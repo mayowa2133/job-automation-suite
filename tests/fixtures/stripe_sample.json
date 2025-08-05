@@ -1,0 +1,36 @@
+{
+  "jobs": [
+    {
+      "absolute_url": "https://stripe.com/jobs/listing/software-engineer-new-grad/4925700",
+      "location": {
+        "name": "New York, Seattle, San Francisco, or Remote"
+      },
+      "id": 4925700,
+      "title": "New Grad Software Engineer"
+    },
+    {
+      "absolute_url": "https://stripe.com/jobs/listing/software-engineer-payments/4769018",
+      "location": {
+        "name": "Seattle, San Francisco, New York, or Remote"
+      },
+      "id": 4769018,
+      "title": "Software Engineer, Payments"
+    },
+    {
+      "absolute_url": "https://stripe.com/jobs/listing/product-manager-connect/6954321",
+      "location": {
+        "name": "San Francisco, Seattle, New York, or Remote"
+      },
+      "id": 6954321,
+      "title": "Product Manager, Connect"
+    },
+    {
+      "absolute_url": "https://stripe.com/jobs/listing/university-grad-engineering-emea/5123456",
+      "location": {
+        "name": "Dublin"
+      },
+      "id": 5123456,
+      "title": "University Grad, Engineering - EMEA"
+    }
+  ]
+}

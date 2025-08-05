@@ -1,0 +1,26 @@
+{
+  "greenhouse": {
+    "Stripe": "stripe",
+    "Duolingo": "duolingo",
+    "Databricks": "databricks",
+    "Cloudflare": "cloudflare",
+    "MongoDB": "mongodb",
+    "Dropbox": "dropbox",
+    "Square (Block)": "block",
+    "IMC Trading": "imc",
+    "Pinterest": "pinterest",
+    "Asana": "asana",
+    "Robinhood": "robinhood",
+    "Reddit": "reddit",
+    "Figma": "figma",
+    "Lyft": "lyft",
+    "Instacart": "instacart",
+    "Datadog": "datadog",
+    "Brex": "brex",
+    "Chime": "chime",
+    "Benchling": "benchling",
+    "Cockroach Labs": "cockroachlabs"
+  },
+  "lever": {},
+  "workday": {}
+}

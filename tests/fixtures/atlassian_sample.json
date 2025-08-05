@@ -1,0 +1,44 @@
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "text": "Graduate Software Engineer",
+    "hostedUrl": "https://jobs.lever.co/atlassian/a1b2c3d4-e5f6-7890-1234-567890abcdef",
+    "applyUrl": "https://jobs.lever.co/atlassian/a1b2c3d4-e5f6-7890-1234-567890abcdef/apply",
+    "categories": {
+      "commitment": "Full-time",
+      "location": "Sydney, Australia",
+      "team": "Engineering"
+    },
+    "createdAt": 1721865600000,
+    "description": "<p>Join our team as a Graduate Software Engineer...</p>",
+    "descriptionPlain": "Join our team as a Graduate Software Engineer..."
+  },
+  {
+    "id": "b2c3d4e5-f6a7-8901-2345-67890abcdef1",
+    "text": "Senior Software Engineer, Confluence",
+    "hostedUrl": "https://jobs.lever.co/atlassian/b2c3d4e5-f6a7-8901-2345-67890abcdef1",
+    "applyUrl": "https://jobs.lever.co/atlassian/b2c3d4e5-f6a7-8901-2345-67890abcdef1/apply",
+    "categories": {
+      "commitment": "Full-time",
+      "location": "Mountain View, CA",
+      "team": "Engineering"
+    },
+    "createdAt": 1721779200000,
+    "description": "<p>We are looking for an experienced Senior Software Engineer...</p>",
+    "descriptionPlain": "We are looking for an experienced Senior Software Engineer..."
+  },
+  {
+    "id": "c3d4e5f6-a7b8-9012-3456-7890abcdef12",
+    "text": "Senior Product Manager, Jira",
+    "hostedUrl": "https://jobs.lever.co/atlassian/c3d4e5f6-a7b8-9012-3456-7890abcdef12",
+    "applyUrl": "https://jobs.lever.co/atlassian/c3d4e5f6-a7b8-9012-3456-7890abcdef12/apply",
+    "categories": {
+      "commitment": "Full-time",
+      "location": "Remote",
+      "team": "Product Management"
+    },
+    "createdAt": 1721692800000,
+    "description": "<p>Drive the future of Jira as a Senior Product Manager...</p>",
+    "descriptionPlain": "Drive the future of Jira as a Senior Product Manager..."
+  }
+]
