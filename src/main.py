@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from src.scrapers.greenhouse import scrape_greenhouse_jobs
 from src.scrapers.custom.google import scrape_google_jobs
 from src.scrapers.custom.shopify import scrape_shopify_jobs
+from src.scrapers.custom.microsoft import scrape_microsoft_jobs
 
 # Configuration
 CONFIG_PATH = "config/companies.json"
@@ -246,6 +247,10 @@ def run_scrapers() -> None:
 
     shopify_jobs = scrape_shopify_jobs(KEYWORD_FILTERS)
     all_current_jobs.extend(shopify_jobs)
+
+    microsoft_jobs = scrape_microsoft_jobs(KEYWORD_FILTERS)
+    all_current_jobs.extend(microsoft_jobs)
+
 
     # Nothing found
     if not all_current_jobs:
