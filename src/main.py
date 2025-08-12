@@ -13,6 +13,7 @@ from src.scrapers.greenhouse import scrape_greenhouse_jobs
 from src.scrapers.custom.google import scrape_google_jobs
 from src.scrapers.custom.shopify import scrape_shopify_jobs
 from src.scrapers.custom.microsoft import scrape_microsoft_jobs
+from src.scrapers.custom.meta import scrape_meta_jobs
 
 # Configuration
 CONFIG_PATH = "config/companies.json"
@@ -250,6 +251,10 @@ def run_scrapers() -> None:
 
     microsoft_jobs = scrape_microsoft_jobs(KEYWORD_FILTERS)
     all_current_jobs.extend(microsoft_jobs)
+
+    meta_jobs = scrape_meta_jobs(KEYWORD_FILTERS)
+    all_current_jobs.extend(meta_jobs)
+
 
 
     # Nothing found
