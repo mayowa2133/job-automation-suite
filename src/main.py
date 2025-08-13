@@ -15,6 +15,7 @@ from src.scrapers.custom.shopify import scrape_shopify_jobs
 from src.scrapers.custom.microsoft import scrape_microsoft_jobs
 from src.scrapers.custom.meta import scrape_meta_jobs
 from src.scrapers.custom.apple import scrape_apple_jobs
+from src.scrapers.custom.amazon import scrape_amazon_jobs
 
 # Configuration
 CONFIG_PATH = "config/companies.json"
@@ -258,6 +259,9 @@ def run_scrapers() -> None:
 
     apple_jobs = scrape_apple_jobs(KEYWORD_FILTERS)
     all_current_jobs.extend(apple_jobs)
+
+    amazon_jobs = scrape_amazon_jobs(KEYWORD_FILTERS)
+    all_current_jobs.extend(amazon_jobs)
 
 
 
