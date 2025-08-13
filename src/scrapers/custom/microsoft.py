@@ -1,69 +1,47 @@
 # src/scrapers/custom/microsoft.py
-import os
+from playwright.sync_api import sync_playwright, TimeoutError
+from contextlib import suppress
+from urllib.parse import urljoin, quote_plus
 import re
 import time
 import random
 import json
-from contextlib import suppress
-from urllib.parse import urljoin, quote_plus
 
-from playwright.sync_api import sync_playwright, TimeoutError
 from src.utils import generate_linkedin_links
 
 BASE = "https://jobs.careers.microsoft.com"
+SEARCH_TEMPLATES = [
+    BASE + "/global/en/search?q={q}&l=en_us",
+    BASE + "/global/en/search?p=Software%20Engineering&l=en_us&q={q}",
+]
 
-# Fast mode lets daily runs be quick. Unset FAST_MODE for deep crawls.
-FAST_MODE = os.getenv("FAST_MODE") == "1"
-
-if FAST_MODE:
-    SEARCH_TEMPLATES = [
-        BASE + "/global/en/search?p=Software%20Engineering&l=en_us&q={q}",
-    ]
-    QUERIES = [
-        "software engineer",
-        "software developer",
-        "new grad",
-        "intern",
-        "early career",
-    ]
-    MAX_SCROLL_LOOPS = 12
-    EARLY_STOP_TARGET = 350
-else:
-    SEARCH_TEMPLATES = [
-        BASE + "/global/en/search?q={q}&l=en_us",
-        BASE + "/global/en/search?p=Software%20Engineering&l=en_us&q={q}",
-    ]
-    QUERIES = [
-        "software engineer",
-        "software developer",
-        "data engineer",
-        "machine learning engineer",
-        "backend engineer",
-        "platform engineer",
-        "infrastructure engineer",
-        "systems engineer",
-        "ios engineer",
-        "android engineer",
-        "graphics engineer",
-        "compiler engineer",
-        "site reliability engineer",
-        "security engineer",
-        "tooling engineer",
-        "new grad",
-        "university grad",
-        "early career",
-        "intern",
-    ]
-    MAX_SCROLL_LOOPS = 45
-    EARLY_STOP_TARGET = 10_000
+QUERIES = [
+    "software engineer",
+    "software developer",
+    "data engineer",
+    "machine learning engineer",
+    "backend engineer",
+    "platform engineer",
+    "infrastructure engineer",
+    "systems engineer",
+    "ios engineer",
+    "android engineer",
+    "graphics engineer",
+    "compiler engineer",
+    "site reliability engineer",
+    "security engineer",
+    "tooling engineer",
+    "new grad",
+    "university grad",
+    "early career",
+    "intern",
+]
 
 JOB_PATH_FRAGMENT = "/job/"
 RELAXED_KEYS = ["engineer", "developer"]
 
-
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
-
 
 def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
     last_height = -1
@@ -85,8 +63,7 @@ def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
                 break
         else:
             stable = 0
-            last_height = new_height
-
+            last_height = new_height  # fixed stray parenthesis
 
 def _collect_from_json_like(obj):
     out = []
@@ -138,7 +115,6 @@ def _collect_from_json_like(obj):
     walk(obj)
     return out
 
-
 def _collect_from_dom(frame):
     anchors = frame.eval_on_selector_all(
         "a[href]",
@@ -169,39 +145,31 @@ def _collect_from_dom(frame):
             items.append({"title": title, "url": target, "location": "N/A"})
     return items
 
-
 def _job_id_from_url(url: str) -> str:
     m = re.search(r"/job/(\d+)", url)
     return m.group(1) if m else ""
 
-
 def scrape_microsoft_jobs(keyword_filters):
     print("Scraping Microsoft with Playwright")
-    t_start = time.time()
     jobs = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/126.0.0.0 Safari/537.36"
-            ),
+            user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/126.0.0.0 Safari/537.36"),
             locale="en-US",
             geolocation={"latitude": 43.6532, "longitude": -79.3832},
             permissions=["geolocation"],
             viewport={"width": 1366, "height": 900},
         )
-
-        # Let the app hydrate on first load. Skip only heavy media at first.
-        def route_initial(route):
+        def route_handler(route):
             rt = route.request.resource_type
             if rt in {"image", "media"}:
                 return route.abort()
             return route.continue_()
-
-        context.route("**/*", route_initial)
+        context.route("**/*", route_handler)
 
         captured = []
 
@@ -230,38 +198,16 @@ def scrape_microsoft_jobs(keyword_filters):
         page = context.new_page()
 
         try:
-            hydrated = False
             for q in QUERIES:
                 for tmpl in SEARCH_TEMPLATES:
                     url = tmpl.format(q=quote_plus(q))
                     print(f"  > Opening {url}")
                     page.goto(url, timeout=60000)
                     with suppress(TimeoutError):
-                        page.wait_for_load_state("networkidle", timeout=8000)
-
-                    # After first hydration tighten routing to skip fonts too
-                    if not hydrated:
-                        with suppress(Exception):
-                            context.unroute("**/*")
-                        def route_after_hydration(route):
-                            rt = route.request.resource_type
-                            if rt in {"image", "media", "font"}:
-                                return route.abort()
-                            return route.continue_()
-                        context.route("**/*", route_after_hydration)
-                        hydrated = True
-
-                    _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS)
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    _scroll_until_stable(page)
                     _rand_sleep()
 
-                    # Early stop once we have plenty before filtering
-                    if FAST_MODE and len(captured) >= EARLY_STOP_TARGET:
-                        print("    early stop reached in fast mode")
-                        break
-                if FAST_MODE and len(captured) >= EARLY_STOP_TARGET:
-                    break
-
-            # Prefer network results
             network_jobs = [
                 {
                     "title": it["title"].strip(),
@@ -272,7 +218,6 @@ def scrape_microsoft_jobs(keyword_filters):
                 if it.get("title") and it.get("url")
             ]
 
-            # Harvest from all frames as a fallback
             dom_jobs = []
             for fr in page.context.pages[0].frames:
                 dom_jobs.extend(_collect_from_dom(fr))
@@ -324,5 +269,4 @@ def scrape_microsoft_jobs(keyword_filters):
             browser.close()
 
     print(f"  > Collected {len(jobs)} Microsoft jobs matching your criteria")
-    print(f"    took {time.time() - t_start:.1f}s")
     return jobs
