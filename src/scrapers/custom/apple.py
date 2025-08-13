@@ -13,7 +13,7 @@ from src.utils import generate_linkedin_links
 BASE = "https://jobs.apple.com"
 JOB_PATH_FRAGMENT = "/details/"
 
-# Locales to try (Apple sometimes georoutes content)
+# Locales to try
 LOCALES = ["en-us", "en-ca"]
 
 def _search_template(locale: str) -> str:
@@ -50,8 +50,27 @@ QUERY_TERMS = [
 # Treat these team codes as software engineering
 KEEP_TEAM_CODES = {"SFTWR", "MLAI", "ML", "AIML"}
 
-# Obvious non engineering hints
-EXCLUDE_HINTS = {"retail", "specialist", "genius", "advisor", "manager", "store", "accommodation"}
+# Exclude obvious non engineering buckets
+EXCLUDE_HINTS_NON_ENG = {
+    "retail",
+    "specialist",
+    "genius",
+    "advisor",
+    "accommodation",
+}
+
+# Explicit manager filters
+MANAGER_HINTS = {
+    " manager",
+    "program manager",
+    "project manager",
+    "product manager",
+    "engineering program manager",
+    "technical program manager",
+    "tpm",
+    "epm",
+    "mgr",
+}
 
 FAST_MODE = os.getenv("FAST_MODE") == "1"
 MAX_SCROLL_LOOPS = 12 if FAST_MODE else 40
@@ -117,27 +136,53 @@ def _team_code_from_url(url: str) -> str:
 
 def _looks_engineering(title: str, url: str) -> bool:
     t = title.lower()
-    if any(h in t for h in EXCLUDE_HINTS):
+
+    # do not confuse App Store with retail
+    if "app store" in t:
+        pass
+    else:
+        if any(h in t for h in EXCLUDE_HINTS_NON_ENG):
+            return False
+
+    # hard filter for manager roles
+    if any(h in t for h in MANAGER_HINTS):
         return False
-    if any(k in t for k in [
+
+    # direct engineering cues
+    eng_terms = [
         "engineer", "engineering", "developer", "software", "swe", "sde",
-        "sdet", "qa engineer", "machine learning", "ml", "ai", "ios", "android",
-        "security", "sre", "devops", "platform", "backend", "frontend", "front end",
-        "full stack", "systems", "data engineer"
-    ]):
+        "sdet", "qa engineer", "quality engineer",
+        "machine learning", "ml", "ai",
+        "ios", "android",
+        "security", "sre", "devops",
+        "platform", "backend", "frontend", "front end", "full stack",
+        "systems", "data engineer", "compiler", "kernel", "graphics",
+        "infrastructure", "cloud",
+    ]
+    if any(k in t for k in eng_terms):
         return True
+
+    # team code as a backstop
     code = _team_code_from_url(url).upper()
-    return any(tag in code for tag in KEEP_TEAM_CODES)
+    if any(tag in code for tag in KEEP_TEAM_CODES):
+        return True
+
+    # exclude retail urls explicitly
+    url_lc = url.lower()
+    if "/retail/" in url_lc:
+        return False
+
+    return False
 
 
 def _collect_from_dom(page):
     """
-    Collect detail links from anchors and elements that store the target
+    Collect detail links from anchors and from elements that store the target
     in data attributes. Apple uses data-analytics-link-destination on cards.
     """
     items, seen = [], set()
 
-    # 1. Anchors with real hrefs
+    # Anchors with real hrefs
     a_items = page.eval_on_selector_all(
         "a[href]",
         "els => els.map(a => ({href: a.getAttribute('href') || '', abs: a.href || '', "
@@ -162,7 +207,7 @@ def _collect_from_dom(page):
         seen.add(key)
         items.append({"title": txt or "", "url": candidate, "location": "N/A"})
 
-    # 2. Cards or buttons with data attributes
+    # Cards or buttons with data attributes
     data_cards = page.eval_on_selector_all(
         "[data-analytics-link-destination]",
         "els => els.map(e => ({dest: e.getAttribute('data-analytics-link-destination') || '', "
