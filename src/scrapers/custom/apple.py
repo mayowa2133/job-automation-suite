@@ -52,20 +52,6 @@ else:
     MAX_SCROLL_LOOPS = 45
     EARLY_STOP_TARGET = 10_000
 
-# Broader keep terms for Apple
-RELAXED_KEYS = [
-    "engineer", "engineering", "developer", "software", "machine", "ml",
-    "data", "ai", "ios", "android", "security", "reliability", "sre",
-    "platform", "backend", "front end", "frontend", "full stack", "devops",
-    "swe", "sde",
-]
-
-# Generic link texts that are not real titles
-GENERIC_TEXT = {
-    "apply", "apply now", "learn more", "view role", "see role", "details",
-    "learn", "read more", "more", "view job", "view more", "see more",
-}
-
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
 
@@ -142,7 +128,6 @@ def _collect_from_json_like(obj):
     return out
 
 def _best_text(txt, aria, title_attr):
-    # Choose the best display string among inner text, aria label, title attribute
     for s in [txt, aria, title_attr]:
         s = (s or "").strip()
         if s:
@@ -186,18 +171,8 @@ def _derive_title_from_url(url: str) -> str:
     m = re.search(r"/details/\d+/?([^/?#]+)", url)
     if not m:
         return "Software Engineer"
-    slug = m.group(1)
-    # Remove common tracking suffixes if present
-    slug = re.sub(r"\?.*$", "", slug)
+    slug = re.sub(r"\?.*$", "", m.group(1))
     return slug.replace("-", " ").replace("_", " ").title()
-
-def _looks_generic(s: str) -> bool:
-    s_norm = re.sub(r"\s+", " ", s.strip().lower())
-    return s_norm in GENERIC_TEXT or s_norm in {g + " »" for g in GENERIC_TEXT}
-
-def _title_matches_any(title: str, keyword_filters) -> bool:
-    t = title.lower()
-    return any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS)
 
 def scrape_apple_jobs(keyword_filters):
     print("Scraping Apple with Playwright")
@@ -293,50 +268,44 @@ def scrape_apple_jobs(keyword_filters):
 
             seen_ids = set()
             seen_url_title = set()
+            kept, dropped = 0, 0
 
-            kept = 0
             for it in pool:
                 raw_title = it.get("title", "").strip()
                 url = it.get("url", "").strip()
                 loc = it.get("location", "N/A")
                 if not url:
+                    dropped += 1
                     continue
 
-                # Build the best possible title for filtering
-                derived = _derive_title_from_url(url)
-                title_for_filter = raw_title if raw_title and not _looks_generic(raw_title) else derived
+                title = raw_title or _derive_title_from_url(url)
 
                 jid = _job_id_from_url(url)
                 if jid:
                     if jid in seen_ids:
+                        dropped += 1
                         continue
                     seen_ids.add(jid)
                 else:
-                    key = (title_for_filter, url)
+                    key = (title, url)
                     if key in seen_url_title:
+                        dropped += 1
                         continue
                     seen_url_title.add(key)
 
-                if not _title_matches_any(title_for_filter, keyword_filters):
-                    # Try the other one if we used raw first
-                    other = derived if title_for_filter == raw_title else raw_title
-                    if not _title_matches_any(other, keyword_filters):
-                        continue
-                    title_for_filter = other if other else title_for_filter
-
-                # Final title to save. Prefer the non generic human label if it is informative.
-                final_title = raw_title if raw_title and not _looks_generic(raw_title) else title_for_filter
-
-                links = generate_linkedin_links("Apple", final_title)
+                # Breadth first for Apple: keep every detail link
+                links = generate_linkedin_links("Apple", title)
                 row = {
                     "Company": "Apple",
-                    "Title": final_title,
+                    "Title": title,
                     "URL": url,
                     "Location": loc,
                 }
                 row.update(links)
                 jobs.append(row)
                 kept += 1
+
+            print(f"    Apple keep audit kept={kept} dropped={dropped}")
 
         except Exception as e:
             print(f"  > Error while scraping Apple: {e}")
