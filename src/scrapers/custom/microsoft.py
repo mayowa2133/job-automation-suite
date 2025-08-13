@@ -1,32 +1,61 @@
 # src/scrapers/custom/microsoft.py
 from playwright.sync_api import sync_playwright, TimeoutError
 from contextlib import suppress
-from urllib.parse import urljoin
-import time
+from urllib.parse import urljoin, quote_plus
 import re
+import time
+import random
 import json
 
 from src.utils import generate_linkedin_links
 
-SEARCH_URLS = [
-    # Software Engineering profession search
-    "https://jobs.careers.microsoft.com/global/en/search?p=Software%20Engineering&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true",
-    # You can add more targeted searches here if you want broader coverage
-    # Program management can be useful for APM like roles
-    # "https://jobs.careers.microsoft.com/global/en/search?p=Program%20Management&l=en_us&pg=1&pgSz=20&o=Relevance&flt=true",
+BASE = "https://jobs.careers.microsoft.com"
+SEARCH_TEMPLATES = [
+    BASE + "/global/en/search?q={q}&l=en_us",
+    BASE + "/global/en/search?p=Software%20Engineering&l=en_us&q={q}",
 ]
 
-BASE = "https://jobs.careers.microsoft.com"
-JOB_PATH_FRAGMENT = "/job/"
+QUERIES = [
+    "software engineer",
+    "software developer",
+    "data engineer",
+    "machine learning engineer",
+    "backend engineer",
+    "platform engineer",
+    "infrastructure engineer",
+    "systems engineer",
+    "ios engineer",
+    "android engineer",
+    "graphics engineer",
+    "compiler engineer",
+    "site reliability engineer",
+    "security engineer",
+    "tooling engineer",
+    "new grad",
+    "university grad",
+    "early career",
+    "intern",
+]
 
-def _scroll_until_stable(page, pause_sec=1.0, max_loops=40):
+JOB_PATH_FRAGMENT = "/job/"
+RELAXED_KEYS = ["engineer", "developer"]
+
+def _rand_sleep(a=0.25, b=0.75):
+    time.sleep(random.uniform(a, b))
+
+def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
     last_height = -1
     stable = 0
     for _ in range(max_loops):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(pause_sec)
+        _rand_sleep(pause_sec * 0.6, pause_sec * 1.2)
         with suppress(Exception):
-            page.wait_for_load_state("networkidle", timeout=3000)
+            page.wait_for_load_state("networkidle", timeout=3500)
+        with suppress(Exception):
+            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more", re.I))
+            if btn and btn.is_visible():
+                btn.click()
+                _rand_sleep()
         new_height = page.evaluate("document.body.scrollHeight")
         if new_height == last_height:
             stable += 1
@@ -34,24 +63,10 @@ def _scroll_until_stable(page, pause_sec=1.0, max_loops=40):
                 break
         else:
             stable = 0
-            last_height = new_height
-        with suppress(Exception):
-            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more", re.I))
-            if btn.is_visible():
-                btn.click()
-                time.sleep(0.8)
+            last_height = new_height)
 
-def _collect_from_json(obj):
-    """Walk any JSON and pull out title url location fields when they look like a job."""
+def _collect_from_json_like(obj):
     out = []
-
-    def looks_like_job(d):
-        if not isinstance(d, dict):
-            return False
-        keys = {k.lower() for k in d.keys()}
-        has_title = any(k in keys for k in ["title", "jobtitle", "name"])
-        has_urlish = any(k in keys for k in ["url", "joburl", "canonicalpositionurl", "applyurl", "detailsurl", "slug", "path", "jobid"])
-        return has_title and has_urlish
 
     def first_str(d, keys):
         for k in keys:
@@ -61,8 +76,7 @@ def _collect_from_json(obj):
         return ""
 
     def build_url(d):
-        # Prefer full urls if present. Otherwise build from slug or jobId.
-        for k in ["url", "jobUrl", "canonicalPositionUrl", "applyUrl", "detailsUrl", "href", "path", "slug"]:
+        for k in ["url", "canonicalurl", "applyurl", "detailsurl", "href", "path", "slug"]:
             for dk, v in d.items():
                 if dk.lower() == k and isinstance(v, str) and v.strip():
                     u = v.strip()
@@ -71,23 +85,26 @@ def _collect_from_json(obj):
                     if u.startswith("/"):
                         return urljoin(BASE, u)
                     return urljoin(BASE, "/" + u)
-        # Try jobId if exposed
-        jid = None
         for dk, v in d.items():
             if dk.lower() in {"jobid", "id"} and isinstance(v, (str, int)):
-                jid = str(v)
-                break
-        if jid:
-            return urljoin(BASE, f"/us/en/job/{jid}")
+                return urljoin(BASE, f"/us/en/job/{v}")
         return ""
+
+    def looks_like_job(d):
+        if not isinstance(d, dict):
+            return False
+        keys = {k.lower() for k in d.keys()}
+        has_title = any(k in keys for k in ["title", "jobtitle", "name"])
+        has_urlish = any(k in keys for k in ["url", "canonicalurl", "applyurl", "detailsurl", "href", "path", "slug", "jobid", "id"])
+        return has_title and has_urlish
 
     def walk(x):
         if isinstance(x, dict):
             if looks_like_job(x):
-                title = first_str(x, ["title", "jobTitle", "name"])
+                title = first_str(x, ["title", "jobtitle", "name"])
                 url = build_url(x)
-                loc = first_str(x, ["location", "jobLocation", "city", "region"]) or "N/A"
-                if title and url:
+                loc = first_str(x, ["location", "joblocation", "city", "region"]) or "N/A"
+                if title and url and JOB_PATH_FRAGMENT in url:
                     out.append({"title": title, "url": url, "location": loc})
             for v in x.values():
                 walk(v)
@@ -98,14 +115,12 @@ def _collect_from_json(obj):
     walk(obj)
     return out
 
-def _collect_from_dom(page):
-    # Collect anchors that point at real job detail pages
-    anchors = page.eval_on_selector_all(
+def _collect_from_dom(frame):
+    anchors = frame.eval_on_selector_all(
         "a[href]",
         "els => els.map(a => ({href: a.getAttribute('href') || '', abs: a.href || '', text: a.innerText || ''}))",
     )
-    items = []
-    seen = set()
+    items, seen = [], set()
     for a in anchors:
         href = a.get("href") or ""
         absu = a.get("abs") or ""
@@ -116,6 +131,8 @@ def _collect_from_dom(page):
         elif JOB_PATH_FRAGMENT in absu:
             target = absu
         if not target:
+            continue
+        if "/search" in target and "q=" in target:
             continue
         if not target.startswith("http"):
             target = urljoin(BASE, target)
@@ -128,6 +145,10 @@ def _collect_from_dom(page):
             items.append({"title": title, "url": target, "location": "N/A"})
     return items
 
+def _job_id_from_url(url: str) -> str:
+    m = re.search(r"/job/(\d+)", url)
+    return m.group(1) if m else ""
+
 def scrape_microsoft_jobs(keyword_filters):
     print("Scraping Microsoft with Playwright")
     jobs = []
@@ -137,29 +158,37 @@ def scrape_microsoft_jobs(keyword_filters):
         context = browser.new_context(
             user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) "
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/126.0.0.0 Safari/537.36")
+                        "Chrome/126.0.0.0 Safari/537.36"),
+            locale="en-US",
+            geolocation={"latitude": 43.6532, "longitude": -79.3832},
+            permissions=["geolocation"],
+            viewport={"width": 1366, "height": 900},
         )
-        # Skip heavy assets to speed up
         def route_handler(route):
             rt = route.request.resource_type
-            if rt in {"image", "media", "font"}:
+            if rt in {"image", "media"}:
                 return route.abort()
             return route.continue_()
         context.route("**/*", route_handler)
 
-        # Capture JSON from the careers app
         captured = []
+
         def on_response(resp):
             try:
                 url = resp.url
-                if "jobs.careers.microsoft.com" not in url and "careers.microsoft.com" not in url:
+                if "careers.microsoft.com" not in url:
                     return
-                # lots of endpoints return JSON during search
-                ct = resp.headers.get("content-type", "")
-                if "application/json" not in ct:
+                data = None
+                with suppress(Exception):
+                    data = resp.json()
+                if data is None:
+                    with suppress(Exception):
+                        txt = resp.text()
+                        if txt and txt.strip().startswith("{"):
+                            data = json.loads(txt)
+                if data is None:
                     return
-                data = resp.json()
-                found = _collect_from_json(data)
+                found = _collect_from_json_like(data)
                 if found:
                     captured.extend(found)
             except Exception:
@@ -169,42 +198,51 @@ def scrape_microsoft_jobs(keyword_filters):
         page = context.new_page()
 
         try:
-            for url in SEARCH_URLS:
-                print(f"  > Opening {url}")
-                page.goto(url, timeout=60000)
-                with suppress(TimeoutError):
-                    page.wait_for_load_state("networkidle", timeout=10000)
-                _scroll_until_stable(page)
+            for q in QUERIES:
+                for tmpl in SEARCH_TEMPLATES:
+                    url = tmpl.format(q=quote_plus(q))
+                    print(f"  > Opening {url}")
+                    page.goto(url, timeout=60000)
+                    with suppress(TimeoutError):
+                        page.wait_for_load_state("networkidle", timeout=10000)
+                    _scroll_until_stable(page)
+                    _rand_sleep()
 
-            # Prefer network results
-            network_jobs = []
-            for it in captured:
+            network_jobs = [{"title": it["title"].strip(), "url": it["url"].strip(), "location": it.get("location", "N/A").strip() or "N/A"}
+                            for it in captured if it.get("title") and it.get("url")]
+
+            dom_jobs = []
+            for fr in page.context.pages[0].frames:
+                dom_jobs.extend(_collect_from_dom(fr))
+
+            pool = network_jobs + dom_jobs
+            print(f"  > Parsed {len(pool)} potential Microsoft roles before filtering")
+
+            seen_ids = set()
+            seen_url_title = set()
+
+            for it in pool:
                 title = it.get("title", "").strip()
                 url = it.get("url", "").strip()
-                loc = it.get("location", "").strip() or "N/A"
-                if title and url:
-                    network_jobs.append({"title": title, "url": url, "location": loc})
-
-            # Fallback to DOM
-            dom_jobs = []
-            if not network_jobs:
-                dom_jobs = _collect_from_dom(page)
-
-            pool = network_jobs if network_jobs else dom_jobs
-            print(f"  > Parsed {len(pool)} potential Microsoft roles before keyword filtering")
-
-            seen = set()
-            for it in pool:
-                title = it["title"]
-                url = it["url"]
                 loc = it.get("location", "N/A")
-                key = (title, url)
-                if key in seen:
+
+                if not url:
                     continue
-                seen.add(key)
+
+                jid = _job_id_from_url(url)
+                if jid:
+                    if jid in seen_ids:
+                        continue
+                    seen_ids.add(jid)
+                else:
+                    key = (title, url)
+                    if key in seen_url_title:
+                        continue
+                    seen_url_title.add(key)
 
                 t = title.lower()
-                if not any(k in t for k in keyword_filters):
+                keep = bool(title) and (any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS))
+                if not keep:
                     continue
 
                 links = generate_linkedin_links("Microsoft", title)
@@ -223,5 +261,5 @@ def scrape_microsoft_jobs(keyword_filters):
             context.close()
             browser.close()
 
-    print(f"  > Collected {len(jobs)} Microsoft jobs matching your keywords")
+    print(f"  > Collected {len(jobs)} Microsoft jobs matching your criteria")
     return jobs
