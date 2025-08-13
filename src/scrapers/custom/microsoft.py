@@ -63,7 +63,7 @@ def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
                 break
         else:
             stable = 0
-            last_height = new_height)
+            last_height = new_height  # fixed stray parenthesis
 
 def _collect_from_json_like(obj):
     out = []
@@ -101,9 +101,9 @@ def _collect_from_json_like(obj):
     def walk(x):
         if isinstance(x, dict):
             if looks_like_job(x):
-                title = first_str(x, ["title", "jobtitle", "name"])
+                title = first_str(x, ["title", "jobTitle", "name"])
                 url = build_url(x)
-                loc = first_str(x, ["location", "joblocation", "city", "region"]) or "N/A"
+                loc = first_str(x, ["location", "jobLocation", "city", "region"]) or "N/A"
                 if title and url and JOB_PATH_FRAGMENT in url:
                     out.append({"title": title, "url": url, "location": loc})
             for v in x.values():
@@ -208,8 +208,15 @@ def scrape_microsoft_jobs(keyword_filters):
                     _scroll_until_stable(page)
                     _rand_sleep()
 
-            network_jobs = [{"title": it["title"].strip(), "url": it["url"].strip(), "location": it.get("location", "N/A").strip() or "N/A"}
-                            for it in captured if it.get("title") and it.get("url")]
+            network_jobs = [
+                {
+                    "title": it["title"].strip(),
+                    "url": it["url"].strip(),
+                    "location": it.get("location", "N/A").strip() or "N/A",
+                }
+                for it in captured
+                if it.get("title") and it.get("url")
+            ]
 
             dom_jobs = []
             for fr in page.context.pages[0].frames:
