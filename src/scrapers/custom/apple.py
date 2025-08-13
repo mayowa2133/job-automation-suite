@@ -14,7 +14,6 @@ BASE = "https://jobs.apple.com"
 SEARCH_TEMPLATE = BASE + "/en-us/search?search={q}"
 JOB_PATH_FRAGMENT = "/details/"
 
-# Fast daily runs
 FAST_MODE = os.getenv("FAST_MODE") == "1"
 if FAST_MODE:
     QUERIES = [
@@ -53,13 +52,16 @@ else:
     MAX_SCROLL_LOOPS = 45
     EARLY_STOP_TARGET = 10_000
 
-# During the catch everything phase allow any engineer or developer
-RELAXED_KEYS = ["engineer", "developer"]
-
+# Relaxed keep terms to catch broad software roles at Apple
+RELAXED_KEYS = [
+    "engineer", "engineering", "developer", "software", "machine", "ml",
+    "data", "ai", "ios", "android", "security", "reliability", "sre",
+    "platform", "backend", "front end", "frontend", "full stack", "devops",
+    "swe", "sde",
+]
 
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
-
 
 def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
     last_height = -1
@@ -69,7 +71,6 @@ def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
         _rand_sleep(pause_sec * 0.6, pause_sec * 1.2)
         with suppress(Exception):
             page.wait_for_load_state("networkidle", timeout=3500)
-        # click any load more style control if present
         with suppress(Exception):
             btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more", re.I))
             if btn and btn.is_visible():
@@ -84,12 +85,7 @@ def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
             stable = 0
             last_height = new_height
 
-
 def _collect_from_json_like(obj):
-    """
-    Walk any JSON structure and pull things that look like jobs.
-    Apple feeds vary by page, so we match common field names.
-    """
     out = []
 
     def first_str(d, keys):
@@ -100,7 +96,6 @@ def _collect_from_json_like(obj):
         return ""
 
     def build_url(d):
-        # common urlish keys
         for k in ["url", "applyurl", "detailsurl", "canonicalurl", "href", "path", "slug"]:
             for dk, v in d.items():
                 if dk.lower() == k and isinstance(v, str) and v.strip():
@@ -110,7 +105,6 @@ def _collect_from_json_like(obj):
                     if u.startswith("/"):
                         return urljoin(BASE, u)
                     return urljoin(BASE, "/" + u)
-        # fallback via an id style field
         for dk, v in d.items():
             if dk.lower() in {"jobid", "id", "rolenumber", "reqid"} and isinstance(v, (str, int)):
                 return urljoin(BASE, f"/en-us/details/{v}")
@@ -130,8 +124,8 @@ def _collect_from_json_like(obj):
                 title = first_str(x, ["title", "jobtitle", "postingtitle", "name"])
                 url = build_url(x)
                 loc = first_str(x, ["location", "joblocation", "city", "region"]) or "N/A"
-                if title and url and JOB_PATH_FRAGMENT in url:
-                    out.append({"title": title, "url": url, "location": loc})
+                if url and JOB_PATH_FRAGMENT in url:
+                    out.append({"title": title or "", "url": url, "location": loc})
             for v in x.values():
                 walk(v)
         elif isinstance(x, list):
@@ -140,7 +134,6 @@ def _collect_from_json_like(obj):
 
     walk(obj)
     return out
-
 
 def _collect_from_dom(frame):
     anchors = frame.eval_on_selector_all(
@@ -168,15 +161,19 @@ def _collect_from_dom(frame):
             continue
         seen.add(key)
         title = txt.split("\n")[0] if txt else ""
-        if title and target:
-            items.append({"title": title, "url": target, "location": "N/A"})
+        items.append({"title": title or "", "url": target, "location": "N/A"})
     return items
-
 
 def _job_id_from_url(url: str) -> str:
     m = re.search(r"/details/(\d+)", url)
     return m.group(1) if m else ""
 
+def _derive_title_from_url(url: str) -> str:
+    m = re.search(r"/details/\d+/?([^/?#]+)", url)
+    if not m:
+        return "Software Engineer"
+    slug = m.group(1)
+    return slug.replace("-", " ").replace("_", " ").title()
 
 def scrape_apple_jobs(keyword_filters):
     print("Scraping Apple with Playwright")
@@ -197,7 +194,6 @@ def scrape_apple_jobs(keyword_filters):
             viewport={"width": 1366, "height": 900},
         )
 
-        # Let the app hydrate first. Skip heavy media only at first.
         def route_initial(route):
             rt = route.request.resource_type
             if rt in {"image", "media"}:
@@ -240,7 +236,6 @@ def scrape_apple_jobs(keyword_filters):
                 with suppress(TimeoutError):
                     page.wait_for_load_state("networkidle", timeout=8000)
 
-                # after first hydration, block fonts too for speed
                 if not hydrated:
                     with suppress(Exception):
                         context.unroute("**/*")
@@ -259,14 +254,12 @@ def scrape_apple_jobs(keyword_filters):
                     print("    early stop reached in fast mode")
                     break
 
-            # Prefer network found jobs
             network_jobs = [
-                {"title": it["title"].strip(), "url": it["url"].strip(), "location": it.get("location", "N/A").strip() or "N/A"}
+                {"title": it.get("title", "").strip(), "url": it["url"].strip(), "location": it.get("location", "N/A").strip() or "N/A"}
                 for it in captured
-                if it.get("title") and it.get("url")
+                if it.get("url")
             ]
 
-            # Fallback to DOM from all frames
             dom_jobs = []
             for fr in page.context.pages[0].frames:
                 dom_jobs.extend(_collect_from_dom(fr))
@@ -285,6 +278,9 @@ def scrape_apple_jobs(keyword_filters):
                 if not url:
                     continue
 
+                if not title:
+                    title = _derive_title_from_url(url)
+
                 jid = _job_id_from_url(url)
                 if jid:
                     if jid in seen_ids:
@@ -296,9 +292,8 @@ def scrape_apple_jobs(keyword_filters):
                         continue
                     seen_url_title.add(key)
 
-                # Relax filters for Apple during the breadth phase
                 t = title.lower()
-                keep = bool(title) and (any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS))
+                keep = any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS)
                 if not keep:
                     continue
 
