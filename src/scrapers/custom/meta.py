@@ -8,6 +8,7 @@ import random
 import json
 import xml.etree.ElementTree as ET
 import requests
+import os
 
 from src.utils import generate_linkedin_links
 
@@ -19,7 +20,7 @@ JOB_PATH_FRAGMENT = "/jobs/"
 QUERIES = [
     "software engineer",
     "software developer",
-    "production engineer",
+    "production engineer",  # Meta SRE track
     "data engineer",
     "machine learning engineer",
     "backend engineer",
@@ -40,7 +41,29 @@ QUERIES = [
     "intern",
 ]
 
-RELAXED_KEYS = ["engineer", "developer"]
+RELAXED_KEYS = ["engineer", "developer", "software", "swe", "sde", "sdet", "reliability", "security", "platform", "systems"]
+
+# Env flags
+def _env_flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+META_SENIORITY_TRIM = _env_flag("META_SENIORITY_TRIM", "1")   # default on
+META_EARLY_ONLY     = _env_flag("META_EARLY_ONLY", "0")       # default off
+
+SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
+EARLY_SIGNS_RE  = re.compile(r"(new\s*grad|university|graduate|early\s*career|entry\s*level|entry|junior|assoc(iate)?|intern|apprentice|engineer\s*[i1]\b)", re.I)
+
+# Manager and PM tracks we do not want unless explicitly early
+MANAGER_HINTS = {
+    " program manager",
+    " product manager",
+    " project manager",
+    " technical program manager",
+    " tpm",
+    " pm ",
+    " manager",
+    " director",
+}
 
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
@@ -173,8 +196,18 @@ def _fallback_sitemap_harvest():
         print(f"    sitemap parse failed {e}")
     return jobs
 
+def _has_early_signal(title: str) -> bool:
+    return bool(EARLY_SIGNS_RE.search(title))
+
+def _has_senior_signal(title: str) -> bool:
+    return bool(SENIOR_HINTS_RE.search(title))
+
+def _looks_manager(title_lc: str) -> bool:
+    return any(h in title_lc for h in MANAGER_HINTS)
+
 def scrape_meta_jobs(keyword_filters):
     print("Scraping Meta with Playwright")
+    t0 = time.time()
     jobs = []
 
     with sync_playwright() as p:
@@ -250,45 +283,71 @@ def scrape_meta_jobs(keyword_filters):
 
             seen_ids = set()
             seen_url_title = set()
+            kept, dropped = 0, 0
+            drop_samples = []
 
             for it in pool:
-                title = it.get("title", "").strip()
-                url = it.get("url", "").strip()
+                title = (it.get("title") or "").strip()
+                url = (it.get("url") or "").strip()
                 loc = it.get("location", "N/A")
 
                 if not url:
+                    dropped += 1
                     continue
 
                 jid = _job_id_from_url(url)
                 if jid:
                     if jid in seen_ids:
+                        dropped += 1
                         continue
                     seen_ids.add(jid)
                 else:
                     key = (title, url)
                     if key in seen_url_title:
+                        dropped += 1
                         continue
                     seen_url_title.add(key)
 
-                keep = False
-                t = title.lower()
-                if title:
-                    if any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS):
-                        keep = True
-                else:
-                    # if we got only a URL from sitemap, keep it to surface in Networking sheet
-                    keep = True
+                # If we only have URL from sitemap and no title
+                if not title:
+                    if META_EARLY_ONLY:
+                        dropped += 1
+                        if len(drop_samples) < 12:
+                            drop_samples.append("DROP early_only no_title")
+                        continue
+                    # keep URL only entries as generic software roles
+                    title = "Software Engineer"
 
-                if not keep:
+                t = title.lower()
+
+                # drop managers unless explicitly early
+                if _looks_manager(t) and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP manager title='{title}'")
                     continue
 
-                if not title:
-                    # try to derive a title from the URL slug
-                    m = re.search(r"/jobs/\d+/?([^/?#]+)", url)
-                    if m:
-                        title = m.group(1).replace("-", " ").title()
-                    else:
-                        title = "Software Engineer"
+                # base keep rule
+                keep = any(k in t for k in [k.lower() for k in keyword_filters]) or any(k in t for k in RELAXED_KEYS)
+                if not keep:
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP not_eng title='{title}'")
+                    continue
+
+                # seniority trim unless early
+                if META_SENIORITY_TRIM and _has_senior_signal(title) and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP senior_trim title='{title}'")
+                    continue
+
+                # early only mode
+                if META_EARLY_ONLY and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP early_only title='{title}'")
+                    continue
 
                 links = generate_linkedin_links("Meta", title)
                 row = {
@@ -299,6 +358,14 @@ def scrape_meta_jobs(keyword_filters):
                 }
                 row.update(links)
                 jobs.append(row)
+                kept += 1
+
+            print(f"  > Collected {len(jobs)} Meta jobs matching your criteria")
+            print(f"    Meta keep audit kept={kept} dropped={dropped}")
+            if drop_samples:
+                print("    sample drops:")
+                for s in drop_samples:
+                    print("     - " + s)
 
         except Exception as e:
             print(f"  > Error while scraping Meta: {e}")
@@ -306,5 +373,5 @@ def scrape_meta_jobs(keyword_filters):
             context.close()
             browser.close()
 
-    print(f"  > Collected {len(jobs)} Meta jobs matching your criteria")
+    print(f"    took {time.time() - t0:.1f}s")
     return jobs
