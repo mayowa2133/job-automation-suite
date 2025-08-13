@@ -6,6 +6,7 @@ import re
 import time
 import random
 import json
+import os
 
 from src.utils import generate_linkedin_links
 
@@ -38,7 +39,38 @@ QUERIES = [
 ]
 
 JOB_PATH_FRAGMENT = "/job/"
-RELAXED_KEYS = ["engineer", "developer"]
+
+# relaxed term check for breadth
+RELAXED_KEYS = [
+    "engineer", "developer", "software", "swe", "sde",
+    "sdet", "qa", "reliability", "security", "platform", "systems",
+]
+
+# env flags
+def _env_flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+MSFT_SENIORITY_TRIM = _env_flag("MSFT_SENIORITY_TRIM", "1")   # default on
+MSFT_EARLY_ONLY     = _env_flag("MSFT_EARLY_ONLY", "0")       # default off
+
+# patterns
+SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
+EARLY_SIGNS_RE  = re.compile(
+    r"(new\s*grad|university|graduate|early\s*career|entry\s*level|entry|junior|assoc(iate)?|intern|apprentice|engineer\s*[i1]\b)",
+    re.I,
+)
+
+# common Microsoft manager tracks we do not want
+MANAGER_HINTS = {
+    " program manager",   # PM
+    " product manager",
+    " project manager",
+    " technical program manager",  # TPM
+    " tpm",
+    " pm ",
+    " manager",           # generic manager catch
+    " director",
+}
 
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
@@ -149,8 +181,18 @@ def _job_id_from_url(url: str) -> str:
     m = re.search(r"/job/(\d+)", url)
     return m.group(1) if m else ""
 
+def _has_early_signal(title: str) -> bool:
+    return bool(EARLY_SIGNS_RE.search(title))
+
+def _has_senior_signal(title: str) -> bool:
+    return bool(SENIOR_HINTS_RE.search(title))
+
+def _looks_manager(title_lc: str) -> bool:
+    return any(h in title_lc for h in MANAGER_HINTS)
+
 def scrape_microsoft_jobs(keyword_filters):
     print("Scraping Microsoft with Playwright")
+    t0 = time.time()
     jobs = []
 
     with sync_playwright() as p:
@@ -166,7 +208,7 @@ def scrape_microsoft_jobs(keyword_filters):
         )
         def route_handler(route):
             rt = route.request.resource_type
-            if rt in {"image", "media"}:
+            if rt in {"image", "media", "font"}:
                 return route.abort()
             return route.continue_()
         context.route("**/*", route_handler)
@@ -227,29 +269,60 @@ def scrape_microsoft_jobs(keyword_filters):
 
             seen_ids = set()
             seen_url_title = set()
+            kept, dropped = 0, 0
+            drop_samples = []
 
             for it in pool:
                 title = it.get("title", "").strip()
                 url = it.get("url", "").strip()
                 loc = it.get("location", "N/A")
 
-                if not url:
+                if not url or not title:
+                    dropped += 1
                     continue
 
                 jid = _job_id_from_url(url)
                 if jid:
                     if jid in seen_ids:
+                        dropped += 1
                         continue
                     seen_ids.add(jid)
                 else:
                     key = (title, url)
                     if key in seen_url_title:
+                        dropped += 1
                         continue
                     seen_url_title.add(key)
 
                 t = title.lower()
-                keep = bool(title) and (any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS))
+
+                # manager filter first
+                if _looks_manager(t) and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP manager title='{title}'")
+                    continue
+
+                # base keep rule
+                keep = any(k in t for k in [k.lower() for k in keyword_filters]) or any(k in t for k in RELAXED_KEYS)
                 if not keep:
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP not_eng title='{title}'")
+                    continue
+
+                # seniority trim unless early signal
+                if MSFT_SENIORITY_TRIM and _has_senior_signal(title) and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP senior_trim title='{title}'")
+                    continue
+
+                # early only gate
+                if MSFT_EARLY_ONLY and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP early_only title='{title}'")
                     continue
 
                 links = generate_linkedin_links("Microsoft", title)
@@ -261,6 +334,14 @@ def scrape_microsoft_jobs(keyword_filters):
                 }
                 row.update(links)
                 jobs.append(row)
+                kept += 1
+
+            print(f"  > Collected {len(jobs)} Microsoft jobs matching your criteria")
+            print(f"    Microsoft keep audit kept={kept} dropped={dropped}")
+            if drop_samples:
+                print("    sample drops:")
+                for s in drop_samples:
+                    print("     - " + s)
 
         except Exception as e:
             print(f"  > Error while scraping Microsoft: {e}")
@@ -268,5 +349,5 @@ def scrape_microsoft_jobs(keyword_filters):
             context.close()
             browser.close()
 
-    print(f"  > Collected {len(jobs)} Microsoft jobs matching your criteria")
+    print(f"    took {time.time() - t0:.1f}s")
     return jobs
