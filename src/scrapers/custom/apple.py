@@ -52,13 +52,19 @@ else:
     MAX_SCROLL_LOOPS = 45
     EARLY_STOP_TARGET = 10_000
 
-# Relaxed keep terms to catch broad software roles at Apple
+# Broader keep terms for Apple
 RELAXED_KEYS = [
     "engineer", "engineering", "developer", "software", "machine", "ml",
     "data", "ai", "ios", "android", "security", "reliability", "sre",
     "platform", "backend", "front end", "frontend", "full stack", "devops",
     "swe", "sde",
 ]
+
+# Generic link texts that are not real titles
+GENERIC_TEXT = {
+    "apply", "apply now", "learn more", "view role", "see role", "details",
+    "learn", "read more", "more", "view job", "view more", "see more",
+}
 
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
@@ -135,16 +141,25 @@ def _collect_from_json_like(obj):
     walk(obj)
     return out
 
+def _best_text(txt, aria, title_attr):
+    # Choose the best display string among inner text, aria label, title attribute
+    for s in [txt, aria, title_attr]:
+        s = (s or "").strip()
+        if s:
+            return s
+    return ""
+
 def _collect_from_dom(frame):
     anchors = frame.eval_on_selector_all(
         "a[href]",
-        "els => els.map(a => ({href: a.getAttribute('href') || '', abs: a.href || '', text: a.innerText || ''}))",
+        "els => els.map(a => ({href: a.getAttribute('href') || '', abs: a.href || '', "
+        "text: a.innerText || '', aria: a.getAttribute('aria-label') || '', title: a.getAttribute('title') || ''}))",
     )
     items, seen = [], set()
     for a in anchors:
         href = a.get("href") or ""
         absu = a.get("abs") or ""
-        txt = (a.get("text") or "").strip()
+        txt = _best_text(a.get("text"), a.get("aria"), a.get("title"))
         target = ""
         if JOB_PATH_FRAGMENT in href:
             target = href
@@ -160,8 +175,7 @@ def _collect_from_dom(frame):
         if key in seen:
             continue
         seen.add(key)
-        title = txt.split("\n")[0] if txt else ""
-        items.append({"title": title or "", "url": target, "location": "N/A"})
+        items.append({"title": txt or "", "url": target, "location": "N/A"})
     return items
 
 def _job_id_from_url(url: str) -> str:
@@ -173,7 +187,17 @@ def _derive_title_from_url(url: str) -> str:
     if not m:
         return "Software Engineer"
     slug = m.group(1)
+    # Remove common tracking suffixes if present
+    slug = re.sub(r"\?.*$", "", slug)
     return slug.replace("-", " ").replace("_", " ").title()
+
+def _looks_generic(s: str) -> bool:
+    s_norm = re.sub(r"\s+", " ", s.strip().lower())
+    return s_norm in GENERIC_TEXT or s_norm in {g + " »" for g in GENERIC_TEXT}
+
+def _title_matches_any(title: str, keyword_filters) -> bool:
+    t = title.lower()
+    return any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS)
 
 def scrape_apple_jobs(keyword_filters):
     print("Scraping Apple with Playwright")
@@ -270,16 +294,17 @@ def scrape_apple_jobs(keyword_filters):
             seen_ids = set()
             seen_url_title = set()
 
+            kept = 0
             for it in pool:
-                title = it.get("title", "").strip()
+                raw_title = it.get("title", "").strip()
                 url = it.get("url", "").strip()
                 loc = it.get("location", "N/A")
-
                 if not url:
                     continue
 
-                if not title:
-                    title = _derive_title_from_url(url)
+                # Build the best possible title for filtering
+                derived = _derive_title_from_url(url)
+                title_for_filter = raw_title if raw_title and not _looks_generic(raw_title) else derived
 
                 jid = _job_id_from_url(url)
                 if jid:
@@ -287,25 +312,31 @@ def scrape_apple_jobs(keyword_filters):
                         continue
                     seen_ids.add(jid)
                 else:
-                    key = (title, url)
+                    key = (title_for_filter, url)
                     if key in seen_url_title:
                         continue
                     seen_url_title.add(key)
 
-                t = title.lower()
-                keep = any(k in t for k in keyword_filters) or any(k in t for k in RELAXED_KEYS)
-                if not keep:
-                    continue
+                if not _title_matches_any(title_for_filter, keyword_filters):
+                    # Try the other one if we used raw first
+                    other = derived if title_for_filter == raw_title else raw_title
+                    if not _title_matches_any(other, keyword_filters):
+                        continue
+                    title_for_filter = other if other else title_for_filter
 
-                links = generate_linkedin_links("Apple", title)
+                # Final title to save. Prefer the non generic human label if it is informative.
+                final_title = raw_title if raw_title and not _looks_generic(raw_title) else title_for_filter
+
+                links = generate_linkedin_links("Apple", final_title)
                 row = {
                     "Company": "Apple",
-                    "Title": title,
+                    "Title": final_title,
                     "URL": url,
                     "Location": loc,
                 }
                 row.update(links)
                 jobs.append(row)
+                kept += 1
 
         except Exception as e:
             print(f"  > Error while scraping Apple: {e}")
