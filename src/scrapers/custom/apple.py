@@ -11,8 +11,13 @@ from playwright.sync_api import sync_playwright, TimeoutError
 from src.utils import generate_linkedin_links
 
 BASE = "https://jobs.apple.com"
-SEARCH_TEMPLATE = BASE + "/en-us/search?{params}"
 JOB_PATH_FRAGMENT = "/details/"
+
+# Locales to try (Apple sometimes georoutes content)
+LOCALES = ["en-us", "en-ca"]
+
+def _search_template(locale: str) -> str:
+    return f"{BASE}/{locale}/search?{{params}}"
 
 # Software heavy team pages
 TEAM_PAGES = [
@@ -37,16 +42,19 @@ QUERY_TERMS = [
     "site reliability engineer",
     "security engineer",
     "sdet",
+    "data engineer",
+    "ios engineer",
+    "android engineer",
 ]
 
 # Treat these team codes as software engineering
 KEEP_TEAM_CODES = {"SFTWR", "MLAI", "ML", "AIML"}
 
-# Guardrails
+# Obvious non engineering hints
 EXCLUDE_HINTS = {"retail", "specialist", "genius", "advisor", "manager", "store", "accommodation"}
 
 FAST_MODE = os.getenv("FAST_MODE") == "1"
-MAX_SCROLL_LOOPS = 14 if FAST_MODE else 45
+MAX_SCROLL_LOOPS = 12 if FAST_MODE else 40
 EARLY_STOP_TARGET = 600 if FAST_MODE else 10_000
 
 
@@ -111,29 +119,30 @@ def _looks_engineering(title: str, url: str) -> bool:
     t = title.lower()
     if any(h in t for h in EXCLUDE_HINTS):
         return False
-    if any(k in t for k in ["engineer", "engineering", "developer", "software", "swe", "sde", "sdet", "qa engineer",
-                             "machine learning", "ml", "ai", "ios", "android", "security", "sre",
-                             "devops", "platform", "backend", "frontend", "full stack", "systems", "data engineer"]):
+    if any(k in t for k in [
+        "engineer", "engineering", "developer", "software", "swe", "sde",
+        "sdet", "qa engineer", "machine learning", "ml", "ai", "ios", "android",
+        "security", "sre", "devops", "platform", "backend", "frontend", "front end",
+        "full stack", "systems", "data engineer"
+    ]):
         return True
-    # fall back to team code in URL
     code = _team_code_from_url(url).upper()
     return any(tag in code for tag in KEEP_TEAM_CODES)
 
 
 def _collect_from_dom(page):
     """
-    Collect detail links from both anchors and elements that store the target
+    Collect detail links from anchors and elements that store the target
     in data attributes. Apple uses data-analytics-link-destination on cards.
     """
+    items, seen = [], set()
+
     # 1. Anchors with real hrefs
     a_items = page.eval_on_selector_all(
         "a[href]",
         "els => els.map(a => ({href: a.getAttribute('href') || '', abs: a.href || '', "
         "text: a.innerText || '', aria: a.getAttribute('aria-label') || '', title: a.getAttribute('title') || ''}))",
     )
-
-    items = []
-    seen = set()
     for a in a_items:
         href = a.get("href") or ""
         absu = a.get("abs") or ""
@@ -143,9 +152,7 @@ def _collect_from_dom(page):
             candidate = href
         elif JOB_PATH_FRAGMENT in absu:
             candidate = absu
-        if not candidate:
-            continue
-        if "/search" in candidate:
+        if not candidate or "/search" in candidate:
             continue
         if not candidate.startswith("http"):
             candidate = urljoin(BASE, candidate)
@@ -153,7 +160,7 @@ def _collect_from_dom(page):
         if key in seen:
             continue
         seen.add(key)
-        items.append({"title": txt, "url": candidate, "location": "N/A"})
+        items.append({"title": txt or "", "url": candidate, "location": "N/A"})
 
     # 2. Cards or buttons with data attributes
     data_cards = page.eval_on_selector_all(
@@ -171,7 +178,7 @@ def _collect_from_dom(page):
         if key in seen:
             continue
         seen.add(key)
-        items.append({"title": txt, "url": url, "location": "N/A"})
+        items.append({"title": txt or "", "url": url, "location": "N/A"})
 
     return items
 
@@ -195,48 +202,73 @@ def scrape_apple_jobs(keyword_filters):
             viewport={"width": 1366, "height": 900},
         )
 
+        # Trim heavy resources
         def route_handler(route):
             rt = route.request.resource_type
             if rt in {"image", "media", "font"}:
                 return route.abort()
             return route.continue_()
-
         context.route("**/*", route_handler)
+
         page = context.new_page()
+        context.set_default_navigation_timeout(90000)
+
+        pooled_raw = []
 
         try:
-            # Team filtered passes first
-            for team in TEAM_PAGES:
-                url = SEARCH_TEMPLATE.format(params=f"team={quote_plus(team)}")
-                print(f"  > Opening {url}")
-                page.goto(url, timeout=60000)
-                with suppress(TimeoutError):
-                    page.wait_for_load_state("networkidle", timeout=8000)
-                _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS)
-                _rand_sleep()
-                if FAST_MODE:
-                    # Small safety net of a couple keyword passes in fast mode
+            # Visit team filtered pages for both locales and harvest after each
+            for locale in LOCALES:
+                for team in TEAM_PAGES:
+                    url = _search_template(locale).format(params=f"team={quote_plus(team)}")
+                    print(f"  > Opening {url}")
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    except TimeoutError:
+                        print("    timeout opening page, continuing")
+                        continue
+                    with suppress(TimeoutError):
+                        page.wait_for_load_state("networkidle", timeout=6000)
+                    _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS)
+                    items = _collect_from_dom(page)
+                    print(f"    harvested {len(items)} from this page")
+                    pooled_raw.extend(items)
+                    _rand_sleep()
+                    if FAST_MODE and len(pooled_raw) >= EARLY_STOP_TARGET:
+                        break
+                if FAST_MODE and len(pooled_raw) >= EARLY_STOP_TARGET:
                     break
-            # Keyword passes
-            for q in (QUERY_TERMS if not FAST_MODE else QUERY_TERMS[:3]):
-                url = SEARCH_TEMPLATE.format(params=f"search={quote_plus(q)}")
-                print(f"  > Opening {url}")
-                page.goto(url, timeout=60000)
-                with suppress(TimeoutError):
-                    page.wait_for_load_state("networkidle", timeout=8000)
-                _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS // 2)
-                _rand_sleep()
 
-            # Build pool only from DOM which includes anchors and data attribute cards
-            pool = _collect_from_dom(page)
-            print(f"  > Parsed {len(pool)} potential Apple roles before filtering")
+            # A few keyword passes as safety nets
+            for locale in LOCALES:
+                for q in (QUERY_TERMS if not FAST_MODE else QUERY_TERMS[:3]):
+                    url = _search_template(locale).format(params=f"search={quote_plus(q)}")
+                    print(f"  > Opening {url}")
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    except TimeoutError:
+                        print("    timeout opening page, continuing")
+                        continue
+                    with suppress(TimeoutError):
+                        page.wait_for_load_state("networkidle", timeout=6000)
+                    _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS // 2)
+                    items = _collect_from_dom(page)
+                    print(f"    harvested {len(items)} from this page")
+                    pooled_raw.extend(items)
+                    _rand_sleep()
+                    if FAST_MODE and len(pooled_raw) >= EARLY_STOP_TARGET:
+                        break
+                if FAST_MODE and len(pooled_raw) >= EARLY_STOP_TARGET:
+                    break
 
+            print(f"  > Parsed {len(pooled_raw)} potential Apple roles before filtering")
+
+            # Filter and de dupe
             seen_ids = set()
             seen_pairs = set()
             kept, dropped = 0, 0
             drop_samples = []
 
-            for it in pool:
+            for it in pooled_raw:
                 raw_title = (it.get("title") or "").strip()
                 url = (it.get("url") or "").strip()
                 loc = it.get("location", "N/A")
@@ -246,7 +278,6 @@ def scrape_apple_jobs(keyword_filters):
 
                 title = raw_title if raw_title else _derive_title_from_url(url)
 
-                # De dupe
                 jid = _job_id_from_url(url)
                 if jid:
                     if jid in seen_ids:
@@ -261,7 +292,6 @@ def scrape_apple_jobs(keyword_filters):
                     seen_pairs.add(key)
 
                 is_eng = _looks_engineering(title, url)
-
                 if not is_eng:
                     dropped += 1
                     if len(drop_samples) < 12:
@@ -285,11 +315,11 @@ def scrape_apple_jobs(keyword_filters):
                 for s in drop_samples:
                     print("     - " + s)
 
-            # If we somehow filtered everything, relax to team code only
+            # If strict pass yields nothing, relax to team code only from pooled_raw
             if kept == 0:
                 relaxed = []
                 seen_ids.clear()
-                for it in pool:
+                for it in pooled_raw:
                     url = (it.get("url") or "").strip()
                     if not url:
                         continue
