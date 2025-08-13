@@ -61,16 +61,28 @@ EXCLUDE_HINTS_NON_ENG = {
 
 # Explicit manager filters
 MANAGER_HINTS = {
-    " manager",
-    "program manager",
-    "project manager",
-    "product manager",
-    "engineering program manager",
-    "technical program manager",
-    "tpm",
-    "epm",
-    "mgr",
+    " program manager",
+    " project manager",
+    " product manager",
+    " engineering program manager",
+    " technical program manager",
+    " tpm",
+    " epm",
+    " mgr",
 }
+
+# Seniority and early career controls
+def _env_flag(name: str, default: str = "0") -> bool:
+    return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+APPLE_SENIORITY_TRIM = _env_flag("APPLE_SENIORITY_TRIM", "1")   # default on
+APPLE_EARLY_ONLY     = _env_flag("APPLE_EARLY_ONLY", "0")       # default off
+
+SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
+EARLY_SIGNS_RE = re.compile(
+    r"(new\s*grad|university|graduate|early\s*career|entry\s*level|entry|junior|assoc(iate)?|intern|apprentice|engineer\s*[i1]\b)",
+    re.I,
+)
 
 FAST_MODE = os.getenv("FAST_MODE") == "1"
 MAX_SCROLL_LOOPS = 12 if FAST_MODE else 40
@@ -148,7 +160,6 @@ def _looks_engineering(title: str, url: str) -> bool:
     if any(h in t for h in MANAGER_HINTS):
         return False
 
-    # direct engineering cues
     eng_terms = [
         "engineer", "engineering", "developer", "software", "swe", "sde",
         "sdet", "qa engineer", "quality engineer",
@@ -162,24 +173,19 @@ def _looks_engineering(title: str, url: str) -> bool:
     if any(k in t for k in eng_terms):
         return True
 
-    # team code as a backstop
     code = _team_code_from_url(url).upper()
     if any(tag in code for tag in KEEP_TEAM_CODES):
         return True
 
-    # exclude retail urls explicitly
-    url_lc = url.lower()
-    if "/retail/" in url_lc:
+    if "/retail/" in url.lower():
         return False
 
     return False
 
 
 def _collect_from_dom(page):
-    """
-    Collect detail links from anchors and from elements that store the target
-    in data attributes. Apple uses data-analytics-link-destination on cards.
-    """
+    """Collect detail links from anchors and from elements that store the target
+    in data attributes. Apple uses data-analytics-link-destination on cards."""
     items, seen = [], set()
 
     # Anchors with real hrefs
@@ -226,6 +232,14 @@ def _collect_from_dom(page):
         items.append({"title": txt or "", "url": url, "location": "N/A"})
 
     return items
+
+
+def _has_senior_signal(title: str) -> bool:
+    return bool(SENIOR_HINTS_RE.search(title))
+
+
+def _has_early_signal(title: str) -> bool:
+    return bool(EARLY_SIGNS_RE.search(title))
 
 
 def scrape_apple_jobs(keyword_filters):
@@ -340,7 +354,21 @@ def scrape_apple_jobs(keyword_filters):
                 if not is_eng:
                     dropped += 1
                     if len(drop_samples) < 12:
-                        drop_samples.append(f"DROP reason=not_eng title='{title}' url='{url[:120]}'")
+                        drop_samples.append(f"DROP not_eng title='{title}' url='{url[:120]}'")
+                    continue
+
+                # Seniority trim unless early signal
+                if APPLE_SENIORITY_TRIM and _has_senior_signal(title) and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP senior_trim title='{title}'")
+                    continue
+
+                # Early career only toggle
+                if APPLE_EARLY_ONLY and not _has_early_signal(title):
+                    dropped += 1
+                    if len(drop_samples) < 12:
+                        drop_samples.append(f"DROP early_only title='{title}'")
                     continue
 
                 links = generate_linkedin_links("Apple", title)
