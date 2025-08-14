@@ -88,6 +88,46 @@ FAST_MODE = os.getenv("FAST_MODE") == "1"
 MAX_SCROLL_LOOPS = 12 if FAST_MODE else 40
 EARLY_STOP_TARGET = 600 if FAST_MODE else 10_000
 
+# Country filtering
+def _allowed_country_codes() -> set[str]:
+    raw = os.getenv("APPLE_ALLOWED_COUNTRIES", "US,CA")
+    return {c.strip().upper() for c in raw.split(",") if c.strip()}
+
+COUNTRY_SYNONYMS = {
+    "US": {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"},
+    "CA": {"CA", "CAN", "CANADA"},
+}
+
+def _loc_in_allowed(loc: str, allowed: set[str], url: str = "", locale_hint: str = "") -> bool:
+    """Return True if location or url locale implies an allowed country."""
+    if not allowed:
+        return True
+    s = (loc or "").strip().upper()
+
+    # direct string hits like Toronto, ON, Canada or Remote, United States
+    if s:
+        if any(f", {code}" in s for code in allowed):
+            return True
+        for code in allowed:
+            if any(token in s for token in COUNTRY_SYNONYMS.get(code, {code})):
+                return True
+
+    # infer from url path locale
+    u = url.lower()
+    if "/en-us/" in u and "US" in allowed:
+        return True
+    if "/en-ca/" in u and "CA" in allowed:
+        return True
+
+    # infer from page locale hint
+    if locale_hint:
+        if locale_hint.lower() == "en-us" and "US" in allowed:
+            return True
+        if locale_hint.lower() == "en-ca" and "CA" in allowed:
+            return True
+
+    return False
+
 
 def _rand_sleep(a=0.25, b=0.75):
     time.sleep(random.uniform(a, b))
@@ -121,6 +161,21 @@ def _best_text(txt, aria, title_attr):
         s = (s or "").strip()
         if s:
             return s
+    return ""
+
+
+def _extract_location_from_text(txt: str) -> str:
+    """Heuristic: many Apple cards include a line with location."""
+    if not txt:
+        return ""
+    lines = [l.strip() for l in txt.split("\n") if l.strip()]
+    for l in lines[::-1]:
+        u = l.upper()
+        if any(tok in u for tok in ["UNITED STATES", "CANADA", ", US", ", CA"]):
+            return l
+        # generic city state pattern
+        if "," in l and len(l) <= 80:
+            return l
     return ""
 
 
@@ -183,9 +238,8 @@ def _looks_engineering(title: str, url: str) -> bool:
     return False
 
 
-def _collect_from_dom(page):
-    """Collect detail links from anchors and from elements that store the target
-    in data attributes. Apple uses data-analytics-link-destination on cards."""
+def _collect_from_dom(page, locale_hint: str):
+    """Collect detail links and try to pull a location hint from visible text."""
     items, seen = [], set()
 
     # Anchors with real hrefs
@@ -211,7 +265,8 @@ def _collect_from_dom(page):
         if key in seen:
             continue
         seen.add(key)
-        items.append({"title": txt or "", "url": candidate, "location": "N/A"})
+        loc = _extract_location_from_text(txt) or ("United States" if locale_hint == "en-us" else "Canada" if locale_hint == "en-ca" else "N/A")
+        items.append({"title": txt or "", "url": candidate, "location": loc, "locale": locale_hint})
 
     # Cards or buttons with data attributes
     data_cards = page.eval_on_selector_all(
@@ -229,7 +284,8 @@ def _collect_from_dom(page):
         if key in seen:
             continue
         seen.add(key)
-        items.append({"title": txt or "", "url": url, "location": "N/A"})
+        loc = _extract_location_from_text(txt) or ("United States" if locale_hint == "en-us" else "Canada" if locale_hint == "en-ca" else "N/A")
+        items.append({"title": txt or "", "url": url, "location": loc, "locale": locale_hint})
 
     return items
 
@@ -246,6 +302,7 @@ def scrape_apple_jobs(keyword_filters):
     print("Scraping Apple with Playwright")
     t0 = time.time()
     jobs = []
+    allowed_codes = _allowed_country_codes()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -288,7 +345,7 @@ def scrape_apple_jobs(keyword_filters):
                     with suppress(TimeoutError):
                         page.wait_for_load_state("networkidle", timeout=6000)
                     _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS)
-                    items = _collect_from_dom(page)
+                    items = _collect_from_dom(page, locale_hint=locale)
                     print(f"    harvested {len(items)} from this page")
                     pooled_raw.extend(items)
                     _rand_sleep()
@@ -310,7 +367,7 @@ def scrape_apple_jobs(keyword_filters):
                     with suppress(TimeoutError):
                         page.wait_for_load_state("networkidle", timeout=6000)
                     _scroll_until_stable(page, max_loops=MAX_SCROLL_LOOPS // 2)
-                    items = _collect_from_dom(page)
+                    items = _collect_from_dom(page, locale_hint=locale)
                     print(f"    harvested {len(items)} from this page")
                     pooled_raw.extend(items)
                     _rand_sleep()
@@ -331,6 +388,8 @@ def scrape_apple_jobs(keyword_filters):
                 raw_title = (it.get("title") or "").strip()
                 url = (it.get("url") or "").strip()
                 loc = it.get("location", "N/A")
+                locale_hint = it.get("locale", "")
+
                 if not url:
                     dropped += 1
                     continue
@@ -349,6 +408,11 @@ def scrape_apple_jobs(keyword_filters):
                         dropped += 1
                         continue
                     seen_pairs.add(key)
+
+                # Country filter
+                if not _loc_in_allowed(loc, allowed_codes, url=url, locale_hint=locale_hint):
+                    dropped += 1
+                    continue
 
                 is_eng = _looks_engineering(title, url)
                 if not is_eng:
@@ -395,6 +459,8 @@ def scrape_apple_jobs(keyword_filters):
                 for it in pooled_raw:
                     url = (it.get("url") or "").strip()
                     if not url:
+                        continue
+                    if not _loc_in_allowed(it.get("location", ""), allowed_codes, url=url, locale_hint=it.get("locale", "")):
                         continue
                     code = _team_code_from_url(url).upper()
                     if not any(tag in code for tag in KEEP_TEAM_CODES):
