@@ -4,13 +4,17 @@ import re
 import time
 import random
 import json
+import math
+import requests
 from contextlib import suppress
-from urllib.parse import urljoin, quote_plus
+from urllib.parse import urljoin, quote_plus, urlencode
 
 from playwright.sync_api import sync_playwright, TimeoutError
 from src.utils import generate_linkedin_links
 
 BASE = "https://www.amazon.jobs"
+JOB_PATH_FRAGMENT = "/en/jobs/"
+
 SEARCH_TEMPLATES = [
     BASE + "/en/search?keywords={q}",
     BASE + "/en/search?business_category=software-development&keywords={q}",
@@ -20,6 +24,11 @@ SEARCH_TEMPLATES = [
 QUERIES = [
     "software engineer",
     "software developer",
+    "software development engineer",
+    "sde",
+    "sde i",
+    "sde ii",
+    "sdet",
     "data engineer",
     "machine learning engineer",
     "backend engineer",
@@ -32,7 +41,6 @@ QUERIES = [
     "compiler engineer",
     "site reliability engineer",
     "security engineer",
-    "sdet",
     "tooling engineer",
     "new grad",
     "university grad",
@@ -40,12 +48,23 @@ QUERIES = [
     "intern",
 ]
 
-JOB_PATH_FRAGMENT = "/en/jobs/"
-
 # relaxed terms for breadth
 RELAXED_KEYS = [
-    "engineer", "developer", "software", "swe", "sde",
-    "sdet", "qa", "reliability", "security", "platform", "systems",
+    "software development engineer",
+    "software engineer",
+    "engineer",
+    "developer",
+    "swe",
+    "sde",
+    "sde i",
+    "sde ii",
+    "sdet",
+    "qa",
+    "reliability",
+    "security",
+    "platform",
+    "systems",
+    "compiler",
 ]
 
 # env flags
@@ -54,6 +73,7 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 AMZN_SENIORITY_TRIM = _env_flag("AMZN_SENIORITY_TRIM", "1")   # default on
 AMZN_EARLY_ONLY     = _env_flag("AMZN_EARLY_ONLY", "0")       # default off
+FAST_MODE           = _env_flag("FAST_MODE", "0")
 
 SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
 EARLY_SIGNS_RE  = re.compile(
@@ -73,19 +93,19 @@ MANAGER_HINTS = {
     " director",
 }
 
-def _rand_sleep(a=0.25, b=0.75):
+def _rand_sleep(a=0.15, b=0.45):
     time.sleep(random.uniform(a, b))
 
-def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
+def _scroll_until_stable(page, pause_sec=0.9, max_loops=30):
     last_height = -1
     stable = 0
     for _ in range(max_loops):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         _rand_sleep(pause_sec * 0.6, pause_sec * 1.2)
         with suppress(Exception):
-            page.wait_for_load_state("networkidle", timeout=3500)
+            page.wait_for_load_state("networkidle", timeout=3000)
         with suppress(Exception):
-            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more", re.I))
+            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more|Next", re.I))
             if btn and btn.is_visible():
                 btn.click()
                 _rand_sleep()
@@ -137,7 +157,7 @@ def _collect_from_json_like(obj):
             if _looks_like_job_dict(x):
                 title = _first_str(x, ["title", "jobtitle", "name"])
                 url = _build_url(x)
-                loc = _first_str(x, ["location", "joblocation", "city", "region"]) or "N/A"
+                loc = _first_str(x, ["location", "joblocation", "city", "region", "normalized_location"]) or "N/A"
                 if title and url and JOB_PATH_FRAGMENT in url:
                     out.append({"title": title, "url": url, "location": loc})
             for v in x.values():
@@ -179,7 +199,7 @@ def _collect_from_dom(frame):
 def _derive_title_from_url(url: str) -> str:
     m = re.search(r"/en/jobs/\d+/?([^/?#]+)", url)
     if not m:
-        return "Software Engineer"
+        return "Software Development Engineer"
     slug = re.sub(r"\?.*$", "", m.group(1))
     return slug.replace("-", " ").replace("_", " ").strip().title()
 
@@ -196,11 +216,74 @@ def _has_senior_signal(title: str) -> bool:
 def _looks_manager(title_lc: str) -> bool:
     return any(h in title_lc for h in MANAGER_HINTS)
 
+def _api_params(query: str, offset: int, limit: int = 100, business_category: str | None = None) -> dict:
+    params = {
+        "keywords": query,
+        "result_limit": limit,
+        "offset": offset,
+        "sort": "recent",
+    }
+    if business_category:
+        params["business_category"] = business_category
+    return params
+
+def _harvest_via_api(queries):
+    """Use amazon.jobs JSON search to page through results fast."""
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json, text/plain, */*",
+    }
+    all_items = []
+    seen = set()
+
+    for q in queries:
+        for cat in [None, "software-development"]:
+            offset = 0
+            page_cap = 5 if FAST_MODE else 40  # safety cap
+            while page_cap > 0:
+                url = f"{BASE}/en/search.json?{urlencode(_api_params(q, offset, 100, cat))}"
+                try:
+                    r = requests.get(url, headers=headers, timeout=20)
+                    if r.status_code != 200:
+                        break
+                    data = r.json()
+                except Exception:
+                    break
+
+                items = _collect_from_json_like(data)
+                # stop if nothing new
+                new_count = 0
+                for it in items:
+                    key = (it["url"], it.get("title", ""))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    all_items.append(it)
+                    new_count += 1
+
+                if new_count == 0:
+                    break
+
+                offset += 100
+                page_cap -= 1
+                _rand_sleep()
+
+    return all_items
+
 def scrape_amazon_jobs(keyword_filters):
-    print("Scraping Amazon with Playwright")
+    print("Scraping Amazon with Playwright + API assist")
     t0 = time.time()
     jobs = []
 
+    # First try the JSON API for breadth and speed
+    api_pool = _harvest_via_api(QUERIES)
+    if api_pool:
+        print(f"  > API harvested {len(api_pool)} potential Amazon roles")
+    else:
+        print("  > API returned nothing useful, falling back to full browser crawl")
+
+    # Browser crawl as a secondary pass
+    dom_pool = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(
@@ -208,7 +291,7 @@ def scrape_amazon_jobs(keyword_filters):
                         "AppleWebKit/537.36 (KHTML, like Gecko) "
                         "Chrome/126.0.0.0 Safari/537.36"),
             locale="en-US",
-            geolocation={"latitude": 43.6532, "longitude": -79.3832},  # Toronto
+            geolocation={"latitude": 43.6532, "longitude": -79.3832},
             permissions=["geolocation"],
             viewport={"width": 1366, "height": 900},
         )
@@ -248,7 +331,6 @@ def scrape_amazon_jobs(keyword_filters):
         page = context.new_page()
 
         try:
-            # Visit search pages and harvest after each
             for q in QUERIES:
                 for tmpl in SEARCH_TEMPLATES:
                     url = tmpl.format(q=quote_plus(q))
@@ -259,7 +341,7 @@ def scrape_amazon_jobs(keyword_filters):
                     _scroll_until_stable(page)
                     _rand_sleep()
 
-            # Pool results from network plus DOM
+            # Pool results from browser network and DOM
             network_jobs = [
                 {
                     "title": it["title"].strip(),
@@ -274,93 +356,94 @@ def scrape_amazon_jobs(keyword_filters):
             for fr in page.context.pages[0].frames:
                 dom_jobs.extend(_collect_from_dom(fr))
 
-            pool = network_jobs + dom_jobs
-            print(f"  > Parsed {len(pool)} potential Amazon roles before filtering")
-
-            # Filter and de dupe
-            seen_ids = set()
-            seen_pairs = set()
-            kept, dropped = 0, 0
-            drop_samples = []
-
-            for it in pool:
-                raw_title = (it.get("title") or "").strip()
-                url = (it.get("url") or "").strip()
-                loc = it.get("location", "N/A")
-
-                if not url:
-                    dropped += 1
-                    continue
-
-                title = raw_title if raw_title else _derive_title_from_url(url)
-
-                jid = _job_id_from_url(url)
-                if jid:
-                    if jid in seen_ids:
-                        dropped += 1
-                        continue
-                    seen_ids.add(jid)
-                else:
-                    key = (title, url)
-                    if key in seen_pairs:
-                        dropped += 1
-                        continue
-                    seen_pairs.add(key)
-
-                t = title.lower()
-
-                # drop managers unless explicitly early
-                if _looks_manager(t) and not _has_early_signal(title):
-                    dropped += 1
-                    if len(drop_samples) < 12:
-                        drop_samples.append(f"DROP manager title='{title}'")
-                    continue
-
-                # base keep rule from user filters or relaxed terms
-                keep = any(k in t for k in [k.lower() for k in keyword_filters]) or any(k in t for k in RELAXED_KEYS)
-                if not keep:
-                    dropped += 1
-                    if len(drop_samples) < 12:
-                        drop_samples.append(f"DROP not_eng title='{title}'")
-                    continue
-
-                # seniority trim unless early
-                if AMZN_SENIORITY_TRIM and _has_senior_signal(title) and not _has_early_signal(title):
-                    dropped += 1
-                    if len(drop_samples) < 12:
-                        drop_samples.append(f"DROP senior_trim title='{title}'")
-                    continue
-
-                # early only mode
-                if AMZN_EARLY_ONLY and not _has_early_signal(title):
-                    dropped += 1
-                    if len(drop_samples) < 12:
-                        drop_samples.append(f"DROP early_only title='{title}'")
-                    continue
-
-                links = generate_linkedin_links("Amazon", title)
-                row = {
-                    "Company": "Amazon",
-                    "Title": title,
-                    "URL": url,
-                    "Location": loc,
-                }
-                row.update(links)
-                jobs.append(row)
-                kept += 1
-
-            print(f"  > Collected {len(jobs)} Amazon jobs matching your criteria")
-            print(f"    Amazon keep audit kept={kept} dropped={dropped}")
-            if drop_samples:
-                print("    sample drops:")
-                for s in drop_samples:
-                    print("     - " + s)
+            dom_pool = network_jobs + dom_jobs
 
         except Exception as e:
-            print(f"  > Error while scraping Amazon: {e}")
+            print(f"  > Error during browser crawl: {e}")
         finally:
             context.close()
             browser.close()
 
+    pool = (api_pool or []) + dom_pool
+    print(f"  > Parsed {len(pool)} potential Amazon roles before filtering")
+
+    # Filter and de dupe
+    seen_ids = set()
+    seen_pairs = set()
+    kept, dropped = 0, 0
+    drop_samples = []
+
+    for it in pool:
+        raw_title = (it.get("title") or "").strip()
+        url = (it.get("url") or "").strip()
+        loc = it.get("location", "N/A")
+
+        if not url:
+            dropped += 1
+            continue
+
+        title = raw_title if raw_title else _derive_title_from_url(url)
+
+        jid = _job_id_from_url(url)
+        if jid:
+            if jid in seen_ids:
+                dropped += 1
+                continue
+            seen_ids.add(jid)
+        else:
+            key = (title, url)
+            if key in seen_pairs:
+                dropped += 1
+                continue
+            seen_pairs.add(key)
+
+        t = title.lower()
+
+        # drop managers unless explicitly early
+        if any(h in t for h in MANAGER_HINTS) and not _has_early_signal(title):
+            dropped += 1
+            if len(drop_samples) < 12:
+                drop_samples.append(f"DROP manager title='{title}'")
+            continue
+
+        # base keep rule from user filters or relaxed terms
+        keep = any(k in t for k in [k.lower() for k in keyword_filters]) or any(k in t for k in RELAXED_KEYS)
+        if not keep:
+            dropped += 1
+            if len(drop_samples) < 12:
+                drop_samples.append(f"DROP not_eng title='{title}'")
+            continue
+
+        # seniority trim unless early
+        if AMZN_SENIORITY_TRIM and _has_senior_signal(title) and not _has_early_signal(title):
+            dropped += 1
+            if len(drop_samples) < 12:
+                drop_samples.append(f"DROP senior_trim title='{title}'")
+            continue
+
+        # early only mode
+        if AMZN_EARLY_ONLY and not _has_early_signal(title):
+            dropped += 1
+            if len(drop_samples) < 12:
+                drop_samples.append(f"DROP early_only title='{title}'")
+            continue
+
+        links = generate_linkedin_links("Amazon", title)
+        row = {
+            "Company": "Amazon",
+            "Title": title,
+            "URL": url,
+            "Location": loc,
+        }
+        row.update(links)
+        jobs.append(row)
+        kept += 1
+
+    print(f"  > Collected {len(jobs)} Amazon jobs matching your criteria")
+    print(f"    Amazon keep audit kept={kept} dropped={dropped}")
+    if drop_samples:
+        print("    sample drops:")
+        for s in drop_samples:
+            print("     - " + s)
     print(f"    took {time.time() - t0:.1f}s")
     return jobs
