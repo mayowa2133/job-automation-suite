@@ -4,7 +4,6 @@ import re
 import time
 import random
 import json
-import math
 import requests
 from contextlib import suppress
 from urllib.parse import urljoin, quote_plus, urlencode
@@ -75,22 +74,45 @@ AMZN_SENIORITY_TRIM = _env_flag("AMZN_SENIORITY_TRIM", "1")   # default on
 AMZN_EARLY_ONLY     = _env_flag("AMZN_EARLY_ONLY", "0")       # default off
 FAST_MODE           = _env_flag("FAST_MODE", "0")
 
-SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
+# country filtering
+def _allowed_country_codes() -> set[str]:
+    raw = os.getenv("AMZN_ALLOWED_COUNTRIES", "US,CA")
+    return {c.strip().upper() for c in raw.split(",") if c.strip()}
+
+COUNTRY_SYNONYMS = {
+    "US": {"US", "USA", "UNITED STATES"},
+    "CA": {"CA", "CAN", "CANADA"},
+}
+
+def _loc_in_allowed(loc: str, allowed: set[str]) -> bool:
+    if not loc:
+        return False
+    s = loc.strip().upper()
+    # quick passes
+    if any(f", {code}" in s for code in allowed):
+        return True
+    # word matches like Remote United States or Toronto Canada
+    for code in list(allowed):
+        if any(token in s for token in COUNTRY_SYNONYMS.get(code, {code})):
+            return True
+    return False
+
+SENIOR_HINTS_RE = re.compile(r"\b(SR|SENIOR|STAFF|PRINCIPAL|LEAD|ARCHITECT|FELLOW|DISTINGUISHED)\b", re.I)
 EARLY_SIGNS_RE  = re.compile(
-    r"(new\s*grad|university|graduate|early\s*career|entry\s*level|entry|junior|assoc(iate)?|intern|apprentice|engineer\s*[i1]\b)",
+    r"(NEW\s*GRAD|UNIVERSITY|GRADUATE|EARLY\s*CAREER|ENTRY\s*LEVEL|ENTRY|JUNIOR|ASSOC(IATE)?|INTERN|APPRENTICE|ENGINEER\s*[I1]\b)",
     re.I,
 )
 
 # manager and PM tracks we do not want unless explicitly early
 MANAGER_HINTS = {
-    " program manager",
-    " product manager",
-    " project manager",
-    " technical program manager",
-    " tpm",
-    " pm ",
-    " manager",
-    " director",
+    " PROGRAM MANAGER",
+    " PRODUCT MANAGER",
+    " PROJECT MANAGER",
+    " TECHNICAL PROGRAM MANAGER",
+    " TPM",
+    " PM ",
+    " MANAGER",
+    " DIRECTOR",
 }
 
 def _rand_sleep(a=0.15, b=0.45):
@@ -126,7 +148,6 @@ def _first_str(d, keys):
     return ""
 
 def _build_url(d):
-    # common keys seen on amazon.jobs payloads
     for k in ["url", "joburl", "canonicalurl", "applyurl", "detailsurl", "href", "path", "jobpath", "slug"]:
         for dk, v in d.items():
             if dk.lower() == k and isinstance(v, str) and v.strip():
@@ -136,7 +157,6 @@ def _build_url(d):
                 if u.startswith("/"):
                     return urljoin(BASE, u)
                 return urljoin(BASE, "/" + u)
-    # last chance from id
     for dk, v in d.items():
         if dk.lower() in {"jobid", "id"} and isinstance(v, (str, int)):
             return urljoin(BASE, f"/en/jobs/{v}")
@@ -228,7 +248,6 @@ def _api_params(query: str, offset: int, limit: int = 100, business_category: st
     return params
 
 def _harvest_via_api(queries):
-    """Use amazon.jobs JSON search to page through results fast."""
     headers = {
         "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
@@ -239,7 +258,7 @@ def _harvest_via_api(queries):
     for q in queries:
         for cat in [None, "software-development"]:
             offset = 0
-            page_cap = 5 if FAST_MODE else 40  # safety cap
+            page_cap = 5 if FAST_MODE else 40
             while page_cap > 0:
                 url = f"{BASE}/en/search.json?{urlencode(_api_params(q, offset, 100, cat))}"
                 try:
@@ -251,7 +270,6 @@ def _harvest_via_api(queries):
                     break
 
                 items = _collect_from_json_like(data)
-                # stop if nothing new
                 new_count = 0
                 for it in items:
                     key = (it["url"], it.get("title", ""))
@@ -275,7 +293,9 @@ def scrape_amazon_jobs(keyword_filters):
     t0 = time.time()
     jobs = []
 
-    # First try the JSON API for breadth and speed
+    allowed_codes = _allowed_country_codes()
+
+    # First try the JSON API
     api_pool = _harvest_via_api(QUERIES)
     if api_pool:
         print(f"  > API harvested {len(api_pool)} potential Amazon roles")
@@ -296,7 +316,6 @@ def scrape_amazon_jobs(keyword_filters):
             viewport={"width": 1366, "height": 900},
         )
 
-        # trim heavy resources
         def route_handler(route):
             rt = route.request.resource_type
             if rt in {"image", "media", "font"}:
@@ -341,7 +360,6 @@ def scrape_amazon_jobs(keyword_filters):
                     _scroll_until_stable(page)
                     _rand_sleep()
 
-            # Pool results from browser network and DOM
             network_jobs = [
                 {
                     "title": it["title"].strip(),
@@ -372,6 +390,7 @@ def scrape_amazon_jobs(keyword_filters):
     seen_pairs = set()
     kept, dropped = 0, 0
     drop_samples = []
+    kept_by_country = {"US": 0, "CA": 0, "OTHER": 0}
 
     for it in pool:
         raw_title = (it.get("title") or "").strip()
@@ -384,6 +403,12 @@ def scrape_amazon_jobs(keyword_filters):
 
         title = raw_title if raw_title else _derive_title_from_url(url)
 
+        # country filter
+        if not _loc_in_allowed(loc, allowed_codes):
+            dropped += 1
+            continue
+
+        # de dupe
         jid = _job_id_from_url(url)
         if jid:
             if jid in seen_ids:
@@ -397,7 +422,7 @@ def scrape_amazon_jobs(keyword_filters):
                 continue
             seen_pairs.add(key)
 
-        t = title.lower()
+        t = title.upper()
 
         # drop managers unless explicitly early
         if any(h in t for h in MANAGER_HINTS) and not _has_early_signal(title):
@@ -407,7 +432,8 @@ def scrape_amazon_jobs(keyword_filters):
             continue
 
         # base keep rule from user filters or relaxed terms
-        keep = any(k in t for k in [k.lower() for k in keyword_filters]) or any(k in t for k in RELAXED_KEYS)
+        tlc = title.lower()
+        keep = any(k in tlc for k in [k.lower() for k in keyword_filters]) or any(k in tlc for k in RELAXED_KEYS)
         if not keep:
             dropped += 1
             if len(drop_samples) < 12:
@@ -439,11 +465,21 @@ def scrape_amazon_jobs(keyword_filters):
         jobs.append(row)
         kept += 1
 
+        # small country tally for your logs
+        u = loc.upper()
+        if "UNITED STATES" in u or ", US" in u or "USA" in u:
+            kept_by_country["US"] += 1
+        elif "CANADA" in u or ", CAN" in u:
+            kept_by_country["CA"] += 1
+        else:
+            kept_by_country["OTHER"] += 1
+
     print(f"  > Collected {len(jobs)} Amazon jobs matching your criteria")
     print(f"    Amazon keep audit kept={kept} dropped={dropped}")
     if drop_samples:
         print("    sample drops:")
         for s in drop_samples:
             print("     - " + s)
+    print(f"    country breakdown US={kept_by_country['US']} CA={kept_by_country['CA']} OTHER={kept_by_country['OTHER']}")
     print(f"    took {time.time() - t0:.1f}s")
     return jobs
