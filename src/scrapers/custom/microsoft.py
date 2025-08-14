@@ -52,6 +52,40 @@ def _env_flag(name: str, default: str = "0") -> bool:
 
 MSFT_SENIORITY_TRIM = _env_flag("MSFT_SENIORITY_TRIM", "1")   # default on
 MSFT_EARLY_ONLY     = _env_flag("MSFT_EARLY_ONLY", "0")       # default off
+FAST_MODE           = _env_flag("FAST_MODE", "0")
+
+# country filter controls
+def _allowed_country_codes() -> set[str]:
+    raw = os.getenv("MSFT_ALLOWED_COUNTRIES", "US,CA")
+    return {c.strip().upper() for c in raw.split(",") if c.strip()}
+
+COUNTRY_SYNONYMS = {
+    "US": {"US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"},
+    "CA": {"CA", "CAN", "CANADA"},
+}
+
+def _loc_in_allowed(loc: str, allowed: set[str]) -> bool:
+    """
+    Keep unknown locations. Only exclude when location clearly maps
+    to a country outside the allowed list.
+    """
+    if not allowed:
+        return True
+    if not loc:
+        return True
+    s = loc.strip().upper()
+    # quick hits like Redmond, WA, US or Toronto, ON, CA
+    if any(f", {code}" in s for code in allowed):
+        return True
+    # text tokens like Remote United States or Vancouver Canada
+    for code in allowed:
+        if any(tok in s for tok in COUNTRY_SYNONYMS.get(code, {code})):
+            return True
+    # if it mentions some other country token, treat as not allowed
+    if any(tok in s for toks in COUNTRY_SYNONYMS.values() for tok in toks):
+        return False
+    # unknown country text gets a pass
+    return True
 
 # patterns
 SENIOR_HINTS_RE = re.compile(r"\b(sr|senior|staff|principal|lead|architect|fellow|distinguished)\b", re.I)
@@ -72,19 +106,19 @@ MANAGER_HINTS = {
     " director",
 }
 
-def _rand_sleep(a=0.25, b=0.75):
+def _rand_sleep(a=0.2, b=0.6):
     time.sleep(random.uniform(a, b))
 
-def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
+def _scroll_until_stable(page, pause_sec=0.9, max_loops=40):
     last_height = -1
     stable = 0
     for _ in range(max_loops):
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         _rand_sleep(pause_sec * 0.6, pause_sec * 1.2)
         with suppress(Exception):
-            page.wait_for_load_state("networkidle", timeout=3500)
+            page.wait_for_load_state("networkidle", timeout=3000)
         with suppress(Exception):
-            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more", re.I))
+            btn = page.get_by_role("button", name=re.compile("Load more|Show more|See more|Next", re.I))
             if btn and btn.is_visible():
                 btn.click()
                 _rand_sleep()
@@ -95,7 +129,7 @@ def _scroll_until_stable(page, pause_sec=0.9, max_loops=45):
                 break
         else:
             stable = 0
-            last_height = new_height  # fixed stray parenthesis
+            last_height = new_height
 
 def _collect_from_json_like(obj):
     out = []
@@ -177,6 +211,12 @@ def _collect_from_dom(frame):
             items.append({"title": title, "url": target, "location": "N/A"})
     return items
 
+def _collect_dom_from_page(page):
+    out = []
+    for fr in page.context.pages[0].frames:
+        out.extend(_collect_from_dom(fr))
+    return out
+
 def _job_id_from_url(url: str) -> str:
     m = re.search(r"/job/(\d+)", url)
     return m.group(1) if m else ""
@@ -194,6 +234,7 @@ def scrape_microsoft_jobs(keyword_filters):
     print("Scraping Microsoft with Playwright")
     t0 = time.time()
     jobs = []
+    allowed_codes = _allowed_country_codes()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -214,6 +255,7 @@ def scrape_microsoft_jobs(keyword_filters):
         context.route("**/*", route_handler)
 
         captured = []
+        dom_accum = []
 
         def on_response(resp):
             try:
@@ -246,9 +288,16 @@ def scrape_microsoft_jobs(keyword_filters):
                     print(f"  > Opening {url}")
                     page.goto(url, timeout=60000)
                     with suppress(TimeoutError):
-                        page.wait_for_load_state("networkidle", timeout=10000)
+                        page.wait_for_load_state("networkidle", timeout=8000)
                     _scroll_until_stable(page)
+                    # collect DOM results from this page right away
+                    dom_now = _collect_dom_from_page(page)
+                    dom_accum.extend(dom_now)
                     _rand_sleep()
+                    if FAST_MODE and len(dom_accum) > 1200:
+                        break
+                if FAST_MODE and len(dom_accum) > 1200:
+                    break
 
             network_jobs = [
                 {
@@ -260,11 +309,7 @@ def scrape_microsoft_jobs(keyword_filters):
                 if it.get("title") and it.get("url")
             ]
 
-            dom_jobs = []
-            for fr in page.context.pages[0].frames:
-                dom_jobs.extend(_collect_from_dom(fr))
-
-            pool = network_jobs + dom_jobs
+            pool = network_jobs + dom_accum
             print(f"  > Parsed {len(pool)} potential Microsoft roles before filtering")
 
             seen_ids = set()
@@ -273,11 +318,16 @@ def scrape_microsoft_jobs(keyword_filters):
             drop_samples = []
 
             for it in pool:
-                title = it.get("title", "").strip()
-                url = it.get("url", "").strip()
+                title = (it.get("title") or "").strip()
+                url = (it.get("url") or "").strip()
                 loc = it.get("location", "N/A")
 
                 if not url or not title:
+                    dropped += 1
+                    continue
+
+                # country gate. unknown locations pass
+                if not _loc_in_allowed(loc, allowed_codes):
                     dropped += 1
                     continue
 
