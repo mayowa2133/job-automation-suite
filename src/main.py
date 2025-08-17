@@ -1,5 +1,6 @@
 # src/main.py
 
+import argparse
 import json
 import os
 import smtplib
@@ -16,6 +17,7 @@ from src.scrapers.custom.microsoft import scrape_microsoft_jobs
 from src.scrapers.custom.meta import scrape_meta_jobs
 from src.scrapers.custom.apple import scrape_apple_jobs
 from src.scrapers.custom.amazon import scrape_amazon_jobs
+from src.scrapers.custom.workday import scrape_workday_jobs
 
 # Configuration
 CONFIG_PATH = "config/companies.json"
@@ -174,7 +176,7 @@ def write_networking_sheet(writer, jobs: list[dict]) -> None:
     for r in rows:
         ws.append([
             r["Company"],
-            r["Title"],  # we will attach hyperlink to URL below
+            r["Title"],  # hyperlink to URL below
             r["Entry_Level_SE_Search"],
             r["General_Role_Search"],
             r["Status"],
@@ -219,10 +221,38 @@ def write_networking_sheet(writer, jobs: list[dict]) -> None:
 
 
 # -----------------------
+# Target gating
+# -----------------------
+
+ALL_TARGETS = {
+    "greenhouse",
+    "google",
+    "shopify",
+    "microsoft",
+    "meta",
+    "apple",
+    "amazon",
+    "workday",
+}
+
+def _parse_csv_flag(val: str | None) -> set[str]:
+    if not val:
+        return set()
+    return {s.strip().lower() for s in val.split(",") if s.strip()}
+
+def _should_run(name: str, only: set[str], skip: set[str]) -> bool:
+    if name in skip:
+        return False
+    if not only or "all" in only:
+        return True
+    return name in only
+
+
+# -----------------------
 # Main run
 # -----------------------
 
-def run_scrapers() -> None:
+def run_scrapers(only: set[str], skip: set[str]) -> None:
     seen_job_urls = load_seen_jobs()
     print(f"Loaded {len(seen_job_urls)} previously seen jobs from state file.")
 
@@ -235,36 +265,48 @@ def run_scrapers() -> None:
         return
 
     greenhouse_companies = companies_config.get("greenhouse", {}) or {}
+    workday_portals = companies_config.get("workday", {}) or {}
+
     all_current_jobs: list[dict] = []
 
     # Greenhouse
-    print("--- Starting Greenhouse Scrape ---")
-    for company, token in greenhouse_companies.items():
-        jobs = scrape_greenhouse_jobs(company, token, KEYWORD_FILTERS)
-        all_current_jobs.extend(jobs)
+    if _should_run("greenhouse", only, skip):
+        print("--- Starting Greenhouse Scrape ---")
+        for company, token in greenhouse_companies.items():
+            jobs = scrape_greenhouse_jobs(company, token, KEYWORD_FILTERS)
+            all_current_jobs.extend(jobs)
+
+    # Workday
+    if _should_run("workday", only, skip) and workday_portals:
+        print("\n--- Starting Workday Scrape ---")
+        wd_jobs = scrape_workday_jobs(KEYWORD_FILTERS, workday_portals)
+        all_current_jobs.extend(wd_jobs)
 
     # Custom scrapes
     print("\n--- Starting Custom Scrapes ---")
-    google_jobs = scrape_google_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(google_jobs)
+    if _should_run("google", only, skip):
+        google_jobs = scrape_google_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(google_jobs)
 
-    shopify_jobs = scrape_shopify_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(shopify_jobs)
+    if _should_run("shopify", only, skip):
+        shopify_jobs = scrape_shopify_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(shopify_jobs)
 
-    microsoft_jobs = scrape_microsoft_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(microsoft_jobs)
+    if _should_run("microsoft", only, skip):
+        microsoft_jobs = scrape_microsoft_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(microsoft_jobs)
 
-    meta_jobs = scrape_meta_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(meta_jobs)
+    if _should_run("meta", only, skip):
+        meta_jobs = scrape_meta_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(meta_jobs)
 
-    apple_jobs = scrape_apple_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(apple_jobs)
+    if _should_run("apple", only, skip):
+        apple_jobs = scrape_apple_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(apple_jobs)
 
-    amazon_jobs = scrape_amazon_jobs(KEYWORD_FILTERS)
-    all_current_jobs.extend(amazon_jobs)
-
-
-
+    if _should_run("amazon", only, skip):
+        amazon_jobs = scrape_amazon_jobs(KEYWORD_FILTERS)
+        all_current_jobs.extend(amazon_jobs)
 
     # Nothing found
     if not all_current_jobs:
@@ -304,7 +346,6 @@ def run_scrapers() -> None:
             # Company sheets
             for company_name, company_df in new_jobs_df.groupby("Company"):
                 print(f"    - Writing sheet for {company_name}...")
-                # Only keep the core columns for company tabs
                 cols = ["Company", "Title", "URL", "Location"]
                 safe_cols = [c for c in cols if c in company_df.columns]
                 df = company_df[safe_cols].copy()
@@ -321,5 +362,33 @@ def run_scrapers() -> None:
     print(f"Updated state file with {len(current_job_urls)} current jobs for next run.")
 
 
+def _cli() -> tuple[set[str], set[str]]:
+    parser = argparse.ArgumentParser(description="Run job scrapers")
+    parser.add_argument(
+        "--only",
+        type=str,
+        default=os.getenv("ONLY", ""),
+        help="Comma separated targets to run. Example: --only workday or --only workday,apple",
+    )
+    parser.add_argument(
+        "--skip",
+        type=str,
+        default=os.getenv("SKIP", ""),
+        help="Comma separated targets to skip. Example: --skip apple,amazon",
+    )
+    args = parser.parse_args()
+    only = _parse_csv_flag(args.only)
+    skip = _parse_csv_flag(args.skip)
+
+    # validate names
+    unknown = (only | skip) - (ALL_TARGETS | {"all"})
+    if unknown:
+        print(f"Warning: unknown targets ignored: {', '.join(sorted(unknown))}")
+        only -= unknown
+        skip -= unknown
+    return only, skip
+
+
 if __name__ == "__main__":
-    run_scrapers()
+    only, skip = _cli()
+    run_scrapers(only, skip)

@@ -22,5 +22,11 @@
     "Cockroach Labs": "cockroachlabs"
   },
   "lever": {},
-  "workday": {}
+  "workday": {
+    "NVIDIA": "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite",
+    "Intel": "https://intel.wd1.myworkdayjobs.com/en-US/External",
+    "AMD": "https://amd.wd1.myworkdayjobs.com/en-US/External",
+    "Qualcomm": "https://qualcomm.wd5.myworkdayjobs.com/en-US/External",
+    "Adobe": "https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced"
+  }
 }
