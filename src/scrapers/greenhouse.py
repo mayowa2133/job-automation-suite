@@ -1,24 +1,42 @@
 import os
 import re
 import requests
+from contextlib import suppress
 from src.utils import generate_linkedin_links
 
-# -----------------------
-# US/CA location filtering helpers
-# -----------------------
+# =======================
+# Flags / configuration
+# =======================
 
 def _gh_flag(name: str, default: str = "0") -> bool:
     return (os.getenv(name, default) or "").strip().lower() in {"1", "true", "yes", "on"}
 
-_GH_DEBUG = _gh_flag("GH_DEBUG", "0")
+GH_DEBUG = _gh_flag("GH_DEBUG", "0")
 
+# Countries to keep (default US & CA). Set GH_ALLOWED_COUNTRIES=ALL to disable country gating.
 _raw_countries = (os.getenv("GH_ALLOWED_COUNTRIES", "US,CA") or "").strip()
 if _raw_countries in {"*", "ALL", "all"}:
-    GH_ALLOWED_COUNTRIES: set[str] = set()  # empty set => keep all
+    GH_ALLOWED_COUNTRIES: set[str] = set()  # empty => keep all
 else:
     GH_ALLOWED_COUNTRIES: set[str] = {c.strip().upper() for c in _raw_countries.split(",") if c.strip()} or {"US", "CA"}
 
+# If we can't infer country at all from the location strings, keep only if this flag is set.
 GH_KEEP_UNKNOWN_COUNTRY = _gh_flag("GH_KEEP_UNKNOWN_COUNTRY", "0")
+
+# New-grad/early-career gating (on by default).
+GH_NEWGRAD_ONLY = _gh_flag("GH_NEWGRAD_ONLY", "1")
+# Internships are excluded by default; flip to 1 to include.
+GH_INCLUDE_INTERNS = _gh_flag("GH_INCLUDE_INTERNS", "0")
+
+# Preferred API hosts: canonical boards API first; legacy host as fallback.
+GH_URL_TEMPLATES = [
+    "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true",
+    "https://api.greenhouse.io/v1/boards/{token}/jobs?content=true",
+]
+
+# =======================
+# US/CA location helpers
+# =======================
 
 _US_STATE_ABBR = set(
     "AL AK AZ AR CA CO CT DC DE FL GA HI ID IL IN IA KS KY "
@@ -33,23 +51,17 @@ _US_STATE_NAMES = {
     "SOUTH CAROLINA","SOUTH DAKOTA","TENNESSEE","TEXAS","UTAH","VERMONT","VIRGINIA","WASHINGTON","WEST VIRGINIA",
     "WISCONSIN","WYOMING","DISTRICT OF COLUMBIA","WASHINGTON, D.C.","WASHINGTON DC","D.C."
 }
-
 _CA_PROV_ABBR = {"AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT"}
 _CA_PROV_NAMES = {
     "ALBERTA","BRITISH COLUMBIA","MANITOBA","NEW BRUNSWICK","NEWFOUNDLAND AND LABRADOR","NOVA SCOTIA",
     "ONTARIO","PRINCE EDWARD ISLAND","QUEBEC","SASKATCHEWAN","YUKON","NORTHWEST TERRITORIES","NUNAVUT"
 }
 
-_REMOTE_RE = re.compile(r"\b(remote|virtual|work\s*from\s*home|wfh)\b", re.I)
-_US_TOKEN_RE = re.compile(r"\b(UNITED STATES|U\.?S\.?A?\.?)\b", re.I)
-_CA_TOKEN_RE = re.compile(r"\bCANADA\b", re.I)
-
-_CA_PROV_TOKEN_RE = re.compile(
-    r"(?:^|,\s*)(AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)(?:\s|,|$)", re.I
-)
-_US_STATE_TOKEN_RE = re.compile(
-    r"(?:^|,\s*)(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)(?:\s|,|$)"
-)
+_REMOTE_RE      = re.compile(r"\b(remote|virtual|work\s*from\s*home|wfh)\b", re.I)
+_US_TOKEN_RE    = re.compile(r"\b(UNITED STATES|U\.?S\.?A?\.?|U\.?S\.?)\b", re.I)
+_CA_TOKEN_RE    = re.compile(r"\bCANADA\b", re.I)
+_CA_PROV_TOKEN  = re.compile(r"(?:^|,\s*)(AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)(?:\s|,|$)", re.I)
+_US_STATE_TOKEN = re.compile(r"(?:^|,\s*)(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)(?:\s|,|$)")
 
 def _infer_countries_from_location(text: str) -> set[str]:
     """
@@ -57,7 +69,7 @@ def _infer_countries_from_location(text: str) -> set[str]:
     Recognizes:
       - 'City, ST' (US), 'City, ON' (CA)
       - Full state/province names
-      - 'Remote - US', 'Remote (Canada)', etc.
+      - 'Remote - US', 'Remote (Canada)', 'North America (Remote)' etc.
       - Explicit 'United States' / 'Canada'
     """
     s = (text or "").strip()
@@ -81,20 +93,20 @@ def _infer_countries_from_location(text: str) -> set[str]:
             countries.add("CA")
 
     # token patterns like ", NY" or ", ON"
-    m_us = _US_STATE_TOKEN_RE.search(up)
-    if m_us and m_us.group(1) in _US_STATE_ABBR:
+    m_us = _US_STATE_TOKEN.search(up)
+    if m_us and m_us.group(1).upper() in _US_STATE_ABBR:
         countries.add("US")
-    m_ca = _CA_PROV_TOKEN_RE.search(up)
+    m_ca = _CA_PROV_TOKEN.search(up)
     if m_ca and m_ca.group(1).upper() in _CA_PROV_ABBR:
         countries.add("CA")
 
     # full names
     for name in _US_STATE_NAMES:
-        if re.search(rf"\b{name}\b", up):
+        if re.search(rf"\b{re.escape(name)}\b", up):
             countries.add("US")
             break
     for name in _CA_PROV_NAMES:
-        if re.search(rf"\b{name}\b", up):
+        if re.search(rf"\b{re.escape(name)}\b", up):
             countries.add("CA")
             break
 
@@ -118,17 +130,17 @@ def _locations_allowed(candidates: list[str]) -> bool:
         if found:
             inferred_any = True
             if found & GH_ALLOWED_COUNTRIES:
-                if _GH_DEBUG:
+                if GH_DEBUG:
                     print(f"    [GH filter] allowed by '{cand}' -> {found & GH_ALLOWED_COUNTRIES}")
                 return True
 
     if not inferred_any:
-        if _GH_DEBUG:
+        if GH_DEBUG:
             print("    [GH filter] no inference from any location; "
                   f"{'keeping' if GH_KEEP_UNKNOWN_COUNTRY else 'dropping'} (GH_KEEP_UNKNOWN_COUNTRY={int(GH_KEEP_UNKNOWN_COUNTRY)})")
         return GH_KEEP_UNKNOWN_COUNTRY
 
-    if _GH_DEBUG:
+    if GH_DEBUG:
         print("    [GH filter] inferred country/countries but none allowed; dropping")
     return False
 
@@ -150,7 +162,6 @@ def _collect_location_strings(job: dict) -> list[str]:
     # offices (can appear for companies with multiple sites)
     offices = job.get("offices") or []
     for o in offices:
-        # typical structure: {'id':..., 'name': 'New York, NY', 'location': {'name': 'New York, NY', ...}}
         name = ""
         if isinstance(o, dict):
             name = (o.get("name") or "") or (o.get("location", {}) or {}).get("name", "")
@@ -167,64 +178,104 @@ def _collect_location_strings(job: dict) -> list[str]:
             uniq.append(s)
     return uniq or ["N/A"]
 
+# =======================
+# New-grad heuristics
+# =======================
 
-# -----------------------
-# Main scrape
-# -----------------------
+SENIOR_RE = re.compile(r"\b(sr\.?|senior|staff|principal|lead|manager|director|head|vp|iii|iv|v)\b", re.I)
+NEW_GRAD_HINTS = [
+    "new grad", "new graduate", "university grad", "university graduate",
+    "recent graduate", "graduate program", "grad program", "graduate scheme",
+    "entry-level", "entry level", "early career", "early talent",
+    "junior", "jr ", "jr.", "associate",
+    "engineer i", "software engineer i", "developer i", "swe i", "se i",
+    "engineer 1", "developer 1", "software engineer 1",
+]
+
+def _is_new_grad_friendly(title: str) -> bool:
+    t = (title or "").lower()
+    if not GH_INCLUDE_INTERNS and re.search(r"\b(intern|internship|co[-\s]?op)\b", t):
+        return False
+    if SENIOR_RE.search(t):
+        return False
+    return any(k in t for k in NEW_GRAD_HINTS)
+
+# =======================
+# Fetch + main scrape
+# =======================
+
+def _fetch_jobs(board_token: str) -> list[dict]:
+    """
+    Try the canonical boards API first, then legacy API as a fallback.
+    """
+    last_err = None
+    for tmpl in GH_URL_TEMPLATES:
+        url = tmpl.format(token=board_token)
+        try:
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            data = r.json() or {}
+            return data.get("jobs", []) or []
+        except Exception as e:
+            last_err = e
+            continue
+    # If both failed, raise the last error so the caller logs it.
+    raise last_err or RuntimeError("Unknown error contacting Greenhouse")
 
 def scrape_greenhouse_jobs(company_name, board_token, keyword_filters):
     """
     Scrapes job listings for a single company using the Greenhouse API and
-    enriches the data with LinkedIn search links, while filtering to US/CA.
+    enriches the data with LinkedIn search links. Filters to US/Canada and,
+    by default, to new-grad friendly roles only.
+
     Env:
-      - GH_ALLOWED_COUNTRIES (default "US,CA"; set "ALL" to disable)
-      - GH_KEEP_UNKNOWN_COUNTRY (default 0)
-      - GH_DEBUG (default 0)
+      - GH_ALLOWED_COUNTRIES      default "US,CA" (set to "ALL" to allow all)
+      - GH_KEEP_UNKNOWN_COUNTRY   default 0
+      - GH_NEWGRAD_ONLY           default 1
+      - GH_INCLUDE_INTERNS        default 0 (set 1 to include internships)
+      - GH_DEBUG                  default 0
     """
     print(f"Scraping {company_name} (Greenhouse)...")
-    url = f"https://api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
-
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
+        jobs = _fetch_jobs(board_token)
+    except Exception as e:
         print(f"  > Could not fetch jobs for {company_name}. Error: {e}")
         return []
 
-    jobs = (response.json() or {}).get("jobs", []) or []
     filtered_jobs = []
+    kw = [k.lower() for k in (keyword_filters or [])]
 
     for job in jobs:
         title = job.get("title", "") or ""
-        title_lower = title.lower()
+        t_lower = title.lower()
 
-        # keyword/title pre-filter
-        if not any(keyword in title_lower for keyword in (keyword_filters or [])):
+        # 1) baseline title filter (your KEYWORD_FILTERS from main.py)
+        if not any(k in t_lower for k in kw):
             continue
 
-        # collect all candidate location strings
-        location_candidates = _collect_location_strings(job)
+        # 2) new-grad gating
+        if GH_NEWGRAD_ONLY and not _is_new_grad_friendly(title):
+            continue
 
-        # US/CA location filter (robust inference)
+        # 3) location gating (US/CA by default, robust inference)
+        location_candidates = _collect_location_strings(job)
         if not _locations_allowed(location_candidates):
-            if _GH_DEBUG:
+            if GH_DEBUG:
                 print(f"    [GH drop] {title} :: locations={location_candidates}")
             continue
 
-        # Choose a display location (join if multiple)
+        # Build output
         display_location = ", ".join(location_candidates) if location_candidates else "N/A"
+        links = generate_linkedin_links(company_name, title)
 
-        linkedin_links = generate_linkedin_links(company_name, title)
-
-        job_data = {
+        row = {
             "Company": company_name,
             "Title": title,
             "URL": job.get("absolute_url"),
             "Location": display_location,
+            **links,
         }
-        job_data.update(linkedin_links)
-
-        filtered_jobs.append(job_data)
+        filtered_jobs.append(row)
 
     print(f"  > Found {len(filtered_jobs)} relevant jobs.")
     return filtered_jobs
