@@ -1,5 +1,3 @@
-# src/main.py
-
 import argparse
 import json
 import os
@@ -88,6 +86,8 @@ def send_email_notification(new_jobs_df: pd.DataFrame) -> None:
         body_lines.append(f"- {job.get('Title','')} at {job.get('Company','')}")
         body_lines.append(f"  Location: {job.get('Location','')}")
         body_lines.append(f"  Link: {job.get('URL','')}")
+        if "Posted" in job and job.get("Posted"):
+            body_lines.append(f"  Posted: {job.get('Posted')}")
         body_lines.append("")
     body = "\n".join(body_lines)
 
@@ -314,11 +314,11 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
         save_seen_jobs(seen_job_urls)
         return
 
-    # De dupe against seen set using URL
+    # De-dupe against seen set using URL
     new_jobs_found: list[dict] = []
     current_job_urls: set[str] = set()
     for job in all_current_jobs:
-        url = job.get("URL", "").strip()
+        url = (job.get("URL") or "").strip()
         if not url:
             continue
         current_job_urls.add(url)
@@ -343,12 +343,20 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
             # Networking sheet first so it appears on top
             write_networking_sheet(writer, new_jobs_found)
 
-            # Company sheets
+            # Company sheets (include 'Posted' and sort if present)
             for company_name, company_df in new_jobs_df.groupby("Company"):
                 print(f"    - Writing sheet for {company_name}...")
-                cols = ["Company", "Title", "URL", "Location"]
-                safe_cols = [c for c in cols if c in company_df.columns]
-                df = company_df[safe_cols].copy()
+
+                df = company_df.copy()
+                if "Posted" in df.columns:
+                    # Sort by most recent Posted first
+                    df["_Posted_dt"] = pd.to_datetime(df["Posted"], errors="coerce")
+                    df = df.sort_values("_Posted_dt", ascending=False, na_position="last").drop(columns=["_Posted_dt"])
+
+                cols = ["Company", "Title", "URL", "Location", "Posted"]
+                safe_cols = [c for c in cols if c in df.columns]
+                df = df[safe_cols]
+
                 df.to_excel(writer, sheet_name=company_name, index=False)
 
                 ws = writer.sheets[company_name]
@@ -360,6 +368,12 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
     # Update state
     save_seen_jobs(current_job_urls)
     print(f"Updated state file with {len(current_job_urls)} current jobs for next run.")
+
+
+def _parse_csv_flag(val: str | None) -> set[str]:
+    if not val:
+        return set()
+    return {s.strip().lower() for s in val.split(",") if s.strip()}
 
 
 def _cli() -> tuple[set[str], set[str]]:

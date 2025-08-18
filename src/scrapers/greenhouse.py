@@ -1,7 +1,7 @@
 import os
 import re
 import requests
-from contextlib import suppress
+from datetime import datetime
 from src.utils import generate_linkedin_links
 
 # =======================
@@ -201,6 +201,32 @@ def _is_new_grad_friendly(title: str) -> bool:
     return any(k in t for k in NEW_GRAD_HINTS)
 
 # =======================
+# Posted date helpers
+# =======================
+
+def _parse_iso_date(s: str | None) -> str:
+    """
+    Convert an ISO-like timestamp to YYYY-MM-DD. On failure, return a best-effort date string.
+    """
+    if not s:
+        return ""
+    try:
+        # normalize Z to +00:00 so fromisoformat works
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.date().isoformat()
+    except Exception:
+        if "T" in s:
+            return s.split("T", 1)[0]
+        return s
+
+def _posted_date_from_job(job: dict) -> str:
+    """
+    Prefer 'updated_at' (Greenhouse updates this on posting/edits),
+    fall back to 'created_at' if present.
+    """
+    return _parse_iso_date(job.get("updated_at") or job.get("created_at"))
+
+# =======================
 # Fetch + main scrape
 # =======================
 
@@ -226,7 +252,7 @@ def scrape_greenhouse_jobs(company_name, board_token, keyword_filters):
     """
     Scrapes job listings for a single company using the Greenhouse API and
     enriches the data with LinkedIn search links. Filters to US/Canada and,
-    by default, to new-grad friendly roles only.
+    by default, to new-grad friendly roles only. Adds a 'Posted' date.
 
     Env:
       - GH_ALLOWED_COUNTRIES      default "US,CA" (set to "ALL" to allow all)
@@ -267,12 +293,14 @@ def scrape_greenhouse_jobs(company_name, board_token, keyword_filters):
         # Build output
         display_location = ", ".join(location_candidates) if location_candidates else "N/A"
         links = generate_linkedin_links(company_name, title)
+        posted_date = _posted_date_from_job(job)
 
         row = {
             "Company": company_name,
             "Title": title,
             "URL": job.get("absolute_url"),
             "Location": display_location,
+            "Posted": posted_date,
             **links,
         }
         filtered_jobs.append(row)
