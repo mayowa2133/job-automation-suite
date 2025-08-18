@@ -41,7 +41,21 @@
     "CarGurus": "cargurus",
     "Babbel": "babbel",
     "Trivago": "trivago",
-    "VaynerX": "vaynerx"
+    "VaynerX": "vaynerx",
+
+    "Affirm": "affirm",
+    "Airtable": "airtable",
+    "Notion": "notion",
+    "Plaid": "plaid",
+    "Grammarly": "grammarly",
+    "Anthropic": "anthropic",
+    "Scale AI": "scaleai",
+    "Flexport": "flexport",
+    "Patreon": "patreon",
+    "Zapier": "zapier",
+    "Carta": "carta",
+    "Rippling": "rippling",
+    "Khan Academy": "khanacademy"
   },
   "lever": {},
   "workday": {
