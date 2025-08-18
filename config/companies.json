@@ -42,22 +42,18 @@
     "Babbel": "babbel",
     "Trivago": "trivago",
     "VaynerX": "vaynerx",
-
     "Affirm": "affirm",
     "Airtable": "airtable",
-    "Notion": "notion",
-    "Plaid": "plaid",
     "Grammarly": "grammarly",
     "Anthropic": "anthropic",
     "Scale AI": "scaleai",
     "Flexport": "flexport",
-    "Patreon": "patreon",
-    "Zapier": "zapier",
     "Carta": "carta",
-    "Rippling": "rippling",
     "Khan Academy": "khanacademy"
   },
-  "lever": {},
+  "lever": {
+    
+  },
   "workday": {
     "NVIDIA": "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite",
     "Intel": "https://intel.wd1.myworkdayjobs.com/en-US/External",
