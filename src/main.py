@@ -1,3 +1,5 @@
+# src/main.py
+
 import argparse
 import json
 import os
@@ -9,6 +11,7 @@ import pandas as pd
 from openpyxl.utils import get_column_letter
 
 from src.scrapers.greenhouse import scrape_greenhouse_jobs
+from src.scrapers.ashby import scrape_ashby_jobs  # <-- NEW
 from src.scrapers.custom.google import scrape_google_jobs
 from src.scrapers.custom.shopify import scrape_shopify_jobs
 from src.scrapers.custom.microsoft import scrape_microsoft_jobs
@@ -58,6 +61,11 @@ NETWORKING_HEADERS = [
 # Helpers
 # -----------------------
 
+def _parse_csv_flag(val: str | None) -> set[str]:
+    if not val:
+        return set()
+    return {s.strip().lower() for s in val.split(",") if s.strip()}
+
 def load_seen_jobs() -> set[str]:
     try:
         with open(STATE_FILE, "r") as f:
@@ -65,13 +73,11 @@ def load_seen_jobs() -> set[str]:
     except FileNotFoundError:
         return set()
 
-
 def save_seen_jobs(job_urls: set[str]) -> None:
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
     with open(STATE_FILE, "w") as f:
         for url in sorted(job_urls):
             f.write(f"{url}\n")
-
 
 def send_email_notification(new_jobs_df: pd.DataFrame) -> None:
     sender_email = os.environ.get("SENDER_EMAIL")
@@ -104,7 +110,6 @@ def send_email_notification(new_jobs_df: pd.DataFrame) -> None:
     except Exception as e:
         print(f"  > Failed to send email. Error: {e}")
 
-
 def add_hyperlinks_to_column(ws, header_text: str) -> None:
     # Find column by header then convert plain URL text to Excel hyperlinks
     header_row = 1
@@ -124,7 +129,6 @@ def add_hyperlinks_to_column(ws, header_text: str) -> None:
             cell.hyperlink = url
             cell.style = "Hyperlink"
 
-
 def autosize_columns(ws, min_width: int = 8, max_width: int = 60) -> None:
     for col in range(1, ws.max_column + 1):
         col_letter = get_column_letter(col)
@@ -135,7 +139,6 @@ def autosize_columns(ws, min_width: int = 8, max_width: int = 60) -> None:
             if len(v) > max_len:
                 max_len = len(v)
         ws.column_dimensions[col_letter].width = max(min_width, min(max_width, max_len + 2))
-
 
 def build_networking_rows(jobs: list[dict]) -> list[dict]:
     """
@@ -162,7 +165,6 @@ def build_networking_rows(jobs: list[dict]) -> list[dict]:
             "Notes": "",
         })
     return rows
-
 
 def write_networking_sheet(writer, jobs: list[dict]) -> None:
     """
@@ -226,6 +228,7 @@ def write_networking_sheet(writer, jobs: list[dict]) -> None:
 
 ALL_TARGETS = {
     "greenhouse",
+    "ashby",      # <-- NEW
     "google",
     "shopify",
     "microsoft",
@@ -234,11 +237,6 @@ ALL_TARGETS = {
     "amazon",
     "workday",
 }
-
-def _parse_csv_flag(val: str | None) -> set[str]:
-    if not val:
-        return set()
-    return {s.strip().lower() for s in val.split(",") if s.strip()}
 
 def _should_run(name: str, only: set[str], skip: set[str]) -> bool:
     if name in skip:
@@ -265,7 +263,8 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
         return
 
     greenhouse_companies = companies_config.get("greenhouse", {}) or {}
-    workday_portals = companies_config.get("workday", {}) or {}
+    ashby_companies      = companies_config.get("ashby", {}) or {}   # <-- NEW
+    workday_portals      = companies_config.get("workday", {}) or {}
 
     all_current_jobs: list[dict] = []
 
@@ -274,6 +273,13 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
         print("--- Starting Greenhouse Scrape ---")
         for company, token in greenhouse_companies.items():
             jobs = scrape_greenhouse_jobs(company, token, KEYWORD_FILTERS)
+            all_current_jobs.extend(jobs)
+
+    # Ashby (new)
+    if _should_run("ashby", only, skip) and ashby_companies:
+        print("\n--- Starting Ashby Scrape ---")
+        for company, slug in ashby_companies.items():
+            jobs = scrape_ashby_jobs(company, slug, KEYWORD_FILTERS)
             all_current_jobs.extend(jobs)
 
     # Workday
@@ -314,7 +320,7 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
         save_seen_jobs(seen_job_urls)
         return
 
-    # De-dupe against seen set using URL
+    # De dupe against seen set using URL
     new_jobs_found: list[dict] = []
     current_job_urls: set[str] = set()
     for job in all_current_jobs:
@@ -370,19 +376,13 @@ def run_scrapers(only: set[str], skip: set[str]) -> None:
     print(f"Updated state file with {len(current_job_urls)} current jobs for next run.")
 
 
-def _parse_csv_flag(val: str | None) -> set[str]:
-    if not val:
-        return set()
-    return {s.strip().lower() for s in val.split(",") if s.strip()}
-
-
 def _cli() -> tuple[set[str], set[str]]:
     parser = argparse.ArgumentParser(description="Run job scrapers")
     parser.add_argument(
         "--only",
         type=str,
         default=os.getenv("ONLY", ""),
-        help="Comma separated targets to run. Example: --only workday or --only workday,apple",
+        help="Comma separated targets to run. Example: --only greenhouse,ashby or --only all",
     )
     parser.add_argument(
         "--skip",

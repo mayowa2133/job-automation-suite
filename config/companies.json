@@ -68,6 +68,20 @@
     "Akuna Capital": "akunacapital",
     "Flow Traders": "flowtraders"
   },
+    "ashby": {
+    "Vercel": "vercel",
+    "Ramp": "ramp",
+    "Replit": "replit",
+    "Linear": "linear",
+    "Retool": "retool",
+    "Perplexity": "perplexity-ai",
+    "Mercury": "mercury",
+    "Loom": "loom",
+    "Vanta": "vanta",
+    "Notion (Ashby board)": "notion", 
+    "Substack": "substack",
+    "Vercel Agency (example)": "vercel-agency"
+  },
   "lever": {
 
   },
