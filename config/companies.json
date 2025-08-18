@@ -49,10 +49,23 @@
     "Scale AI": "scaleai",
     "Flexport": "flexport",
     "Carta": "carta",
-    "Khan Academy": "khanacademy"
+    "Khan Academy": "khanacademy",
+
+    "Coinbase": "coinbase",
+    "Discord": "discord",
+    "Squarespace": "squarespace",
+    "Elastic": "elastic",
+    "Snyk": "snyk",
+    "Fastly": "fastly",
+    "DigitalOcean": "digitalocean",
+    "ZoomInfo": "zoominfo",
+    "Niantic": "niantic",
+    "SpaceX": "spacex",
+    "Postman": "postman",
+    "Marqeta": "marqeta"
   },
   "lever": {
-    
+
   },
   "workday": {
     "NVIDIA": "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite",
