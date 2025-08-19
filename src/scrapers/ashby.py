@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import json
 import requests
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -27,16 +26,13 @@ else:
 ASHBY_KEEP_UNKNOWN_COUNTRY = _flag("ASHBY_KEEP_UNKNOWN_COUNTRY", "0")
 
 # New-grad/early-career gating (on by default), internships excluded by default
-ASHBY_NEWGRAD_ONLY   = _flag("ASHBY_NEWGRAD_ONLY", "1")
+ASHBY_NEWGRAD_ONLY    = _flag("ASHBY_NEWGRAD_ONLY", "1")
 ASHBY_INCLUDE_INTERNS = _flag("ASHBY_INCLUDE_INTERNS", "0")
 
 # Preferred public endpoints (we try these in order).
-# 1) GET job board endpoint seen in many orgs
-# 2) POST job board endpoint (same payload returned)
-# 3) Public GraphQL used by the hosted boards (fallback)
 GET_TPL  = "https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
 POST_URL = "https://api.ashbyhq.com/posting-api/job-board"
-GQL_URL  = "https://jobs.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings"  # best-known public op name
+GQL_URL  = "https://jobs.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings"
 
 
 # =======================
@@ -65,6 +61,7 @@ _CA_PROV_NAMES = {
 _REMOTE_RE      = re.compile(r"\b(remote|virtual|work\s*from\s*home|wfh)\b", re.I)
 _US_TOKEN_RE    = re.compile(r"\b(UNITED STATES|U\.?S\.?A?\.?|U\.?S\.?)\b", re.I)
 _CA_TOKEN_RE    = re.compile(r"\bCANADA\b", re.I)
+_NA_TOKEN_RE    = re.compile(r"\b(NORTH AMERICA|AMERICAS)\b", re.I)
 _CA_PROV_TOKEN  = re.compile(r"(?:^|,\s*)(AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)(?:\s|,|$)", re.I)
 _US_STATE_TOKEN = re.compile(r"(?:^|,\s*)(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)(?:\s|,|$)", re.I)
 
@@ -80,11 +77,13 @@ def _infer_countries_from_location(text: str) -> set[str]:
         countries.add("US")
     if _CA_TOKEN_RE.search(up):
         countries.add("CA")
+    if _NA_TOKEN_RE.search(up):
+        countries.update({"US", "CA"})
 
     if _REMOTE_RE.search(up):
-        if _US_TOKEN_RE.search(up):
+        if _US_TOKEN_RE.search(up) or _NA_TOKEN_RE.search(up):
             countries.add("US")
-        if _CA_TOKEN_RE.search(up):
+        if _CA_TOKEN_RE.search(up) or _NA_TOKEN_RE.search(up):
             countries.add("CA")
 
     m_us = _US_STATE_TOKEN.search(up)
@@ -154,100 +153,214 @@ def _is_new_grad_friendly(title: str) -> bool:
 
 
 # =======================
+# Slug utilities + retries
+# =======================
+
+_slug_clean_re = re.compile(r"[^a-z0-9]+")
+def _slugify(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = s.replace("&", "and")
+    s = _slug_clean_re.sub("-", s)
+    return s.strip("-")
+
+def _candidate_slugs(company_name: str, org_slug: str) -> list[str]:
+    # Generate a compact set of likely slugs to try
+    base = (org_slug or "").strip()
+    name = (company_name or "").strip()
+    cands = [
+        base,
+        base.lower(),
+        _slugify(base),
+        _slugify(name),
+        _slugify(name.replace("inc", "")),
+        _slugify(name.replace("labs", "")),
+        _slugify(name.replace(" ai", "")),
+        _slugify(name + " ai"),
+    ]
+    # Remove empties & dups, preserve order
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+def _request(method: str, url: str, payload: dict | None = None, max_retries: int = 2) -> requests.Response | None:
+    # Lightweight retry/backoff for 429/5xx/timeouts
+    backoff = 0.7
+    for attempt in range(max_retries + 1):
+        try:
+            if method == "GET":
+                r = requests.get(url, timeout=30)
+            else:
+                r = requests.post(url, json=payload or {}, timeout=30)
+            if r.status_code in (429, 500, 502, 503, 504):
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+            r.raise_for_status()
+            return r
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            if ASHBY_DEBUG:
+                print(f"    [Ashby fetch] {method} {url} -> {e}")
+            return None
+    return None
+
+def _get_json(method: str, url: str, payload: dict | None = None) -> dict | None:
+    r = _request(method, url, payload)
+    if not r:
+        return None
+    with suppress(Exception):
+        return r.json()
+    return None
+
+
+# =======================
+# Normalization helpers
+# =======================
+
+def _push_job(item: dict, sink: list[dict]) -> None:
+    if not isinstance(item, dict):
+        return
+    title = item.get("title") or item.get("jobTitle") or ""
+    url   = (
+        item.get("jobPostUrl") or item.get("jobUrl") or item.get("url")
+        or item.get("applyUrl") or item.get("postingUrl")
+    )
+    # location fields can vary wildly
+    loc = item.get("location")
+    if not loc:
+        loc = item.get("locationText") or item.get("displayLocation") or item.get("officeLocation")
+    if not loc:
+        locs = item.get("locations") or item.get("offices")  # may be list[str|dict]
+        if isinstance(locs, list) and locs:
+            parts = []
+            for x in locs:
+                if isinstance(x, str):
+                    parts.append(x.strip())
+                elif isinstance(x, dict):
+                    parts.append((x.get("name") or x.get("location") or x.get("displayName") or "").strip())
+            loc = ", ".join([p for p in parts if p])
+
+    created = (
+        item.get("createdAt") or item.get("publishedAt") or item.get("postDate")
+        or item.get("openedAt") or item.get("updatedAt") or item.get("updated_at")
+    )
+
+    if not (title and url):
+        return
+
+    sink.append({
+        "title": title,
+        "url": url,
+        "location": loc or "",
+        "createdAt": created,
+    })
+
+def _normalize_jobs(raw: dict) -> list[dict]:
+    if not isinstance(raw, dict):
+        return []
+
+    jobs: list[dict] = []
+
+    # Common shapes:
+
+    # A) Direct lists
+    for key in ("jobs", "jobPostings", "openJobs", "openings"):
+        lst = raw.get(key)
+        if isinstance(lst, list):
+            for j in lst:
+                _push_job(j, jobs)
+
+    # B) jobBoard wrapper (REST & GraphQL)
+    jb = raw.get("jobBoard") or {}
+    if isinstance(jb, dict):
+        for key in ("jobs", "openings", "openJobs"):
+            lst = jb.get(key)
+            if isinstance(lst, list):
+                for j in lst:
+                    _push_job(j, jobs)
+
+        # Nested departments/teams with jobs
+        for k in ("departments", "groups", "teams", "categories"):
+            depts = jb.get(k)
+            if isinstance(depts, list):
+                for d in depts:
+                    for key in ("jobs", "openings", "openJobs"):
+                        lst = (d or {}).get(key)
+                        if isinstance(lst, list):
+                            for j in lst:
+                                _push_job(j, jobs)
+
+    # C) GraphQL data wrapper
+    data = raw.get("data") or {}
+    if isinstance(data, dict):
+        jobs += _normalize_jobs(data)  # recurse into same patterns
+
+    # D) Sometimes everything is under 'result' or 'payload'
+    result = raw.get("result") or raw.get("payload") or {}
+    if isinstance(result, dict):
+        jobs += _normalize_jobs(result)
+
+    # Deduplicate by (title,url)
+    seen, deduped = set(), []
+    for j in jobs:
+        key = (j.get("title"), j.get("url"))
+        if key not in seen:
+            seen.add(key)
+            deduped.append(j)
+    return deduped
+
+
+# =======================
 # Fetchers
 # =======================
 
-def _get_json(url: str, method: str = "GET", payload: dict | None = None) -> dict | None:
-    try:
-        if method == "GET":
-            r = requests.get(url, timeout=30)
-        elif method == "POST":
-            r = requests.post(url, timeout=30, json=payload or {})
-        else:
-            return None
-        r.raise_for_status()
-        with suppress(Exception):
-            return r.json()
-    except Exception as e:
-        if ASHBY_DEBUG:
-            print(f"    [Ashby fetch] {method} {url} -> {e}")
-        return None
-
-def _fetch_jobs(slug: str) -> list[dict]:
-    """
-    Try multiple public Ashby endpoints and normalize out a list of job dicts.
-    We accept any of these shapes and project fields to a common structure.
-    """
+def _fetch_for_slug(slug: str) -> tuple[list[dict], str | None]:
     # 1) GET
-    data = _get_json(GET_TPL.format(slug=slug))
+    data = _get_json("GET", GET_TPL.format(slug=slug))
     if not data:
         # 2) POST
-        data = _get_json(POST_URL, method="POST", payload={"organizationSlug": slug})
-
+        data = _get_json("POST", POST_URL, payload={"organizationSlug": slug})
     if not data:
-        # 3) Public GraphQL (fallback)
+        # 3) GraphQL
         gql_body = {
             "operationName": "JobBoardWithOpenings",
             "variables": {"organizationSlug": slug},
             "query": (
                 "query JobBoardWithOpenings($organizationSlug: String!) {"
                 "  jobBoard(organizationSlug: $organizationSlug) {"
-                "    jobs {"
-                "      id title createdAt jobPostUrl location { name }"
-                "    }"
+                "    jobs { id title createdAt jobPostUrl location { name } }"
+                "    departments { name jobs { id title createdAt jobPostUrl location { name } } }"
                 "  }"
                 "}"
             ),
         }
-        data = _get_json(GQL_URL, method="POST", payload=gql_body)
+        data = _get_json("POST", GQL_URL, payload=gql_body)
 
     if not data:
-        return []
+        return [], None
 
-    # Normalize to a list of job-like dicts
-    # We’ll handle the most common shapes we’ve seen in the wild.
-    candidates: list[dict] = []
+    jobs = _normalize_jobs(data)
+    return jobs, slug
 
-    def push(item: dict):
-        if not isinstance(item, dict):
-            return
-        title = item.get("title") or item.get("jobTitle") or ""
-        url   = item.get("jobPostUrl") or item.get("jobUrl") or item.get("url") or item.get("applyUrl")
-        loc   = item.get("location")
-        if isinstance(loc, dict):
-            loc = loc.get("name") or loc.get("location") or loc.get("displayName")
-        created = item.get("createdAt") or item.get("publishedAt") or item.get("postDate") or item.get("openedAt")
-        candidates.append({
-            "title": title or "",
-            "url": url or "",
-            "location": (loc or "").strip() if isinstance(loc, str) else (loc or ""),
-            "createdAt": created,
-        })
-
-    # direct 'jobs' list
-    if isinstance(data.get("jobs"), list):
-        for j in data["jobs"]:
-            push(j)
-
-    # 'jobPostings' list
-    if isinstance(data.get("jobPostings"), list):
-        for j in data["jobPostings"]:
-            push(j)
-
-    # 'jobBoard' wrapper
-    jb = data.get("jobBoard") or {}
-    if isinstance(jb.get("jobs"), list):
-        for j in jb["jobs"]:
-            push(j)
-
-    # 'data' wrapper for GraphQL
-    d2 = data.get("data") or {}
-    jb2 = d2.get("jobBoard") or {}
-    if isinstance(jb2.get("jobs"), list):
-        for j in jb2["jobs"]:
-            push(j)
-
-    return [c for c in candidates if (c["title"] and c["url"])]
+def _fetch_jobs(company_name: str, org_slug: str) -> tuple[list[dict], str | None]:
+    last_err_slug = None
+    for slug in _candidate_slugs(company_name, org_slug):
+        jobs, used = _fetch_for_slug(slug)
+        if jobs:
+            if ASHBY_DEBUG:
+                print(f"    [Ashby] slug '{used}' yielded {len(jobs)} jobs (pre-filter)")
+            return jobs, used
+        last_err_slug = slug
+    if ASHBY_DEBUG and last_err_slug:
+        print(f"    [Ashby] no data for tried slugs; last tried '{last_err_slug}'")
+    return [], None
 
 
 # =======================
@@ -263,18 +376,18 @@ def _collect_location_strings(raw_location) -> list[str]:
             if isinstance(x, str) and x.strip():
                 out.append(x.strip())
             elif isinstance(x, dict):
-                name = (x.get("name") or x.get("location") or "").strip()
+                name = (x.get("name") or x.get("location") or x.get("displayName") or "").strip()
                 if name:
                     out.append(name)
     elif isinstance(raw_location, dict):
-        name = (raw_location.get("name") or raw_location.get("location") or "").strip()
+        name = (raw_location.get("name") or raw_location.get("location") or raw_location.get("displayName") or "").strip()
         if name:
             out.append(name)
 
     # de-dupe
     seen, uniq = set(), []
     for s in out:
-        if s not in seen:
+        if s and s not in seen:
             seen.add(s)
             uniq.append(s)
     return uniq or ["N/A"]
@@ -285,7 +398,6 @@ def _fmt_posted(created_at) -> str:
     """
     if not created_at:
         return ""
-    # epoch ms?
     with suppress(Exception):
         if isinstance(created_at, (int, float)):
             if created_at > 10_000_000_000:  # ms
@@ -293,9 +405,7 @@ def _fmt_posted(created_at) -> str:
             else:
                 dt = datetime.fromtimestamp(created_at, tz=timezone.utc)
             return dt.strftime("%Y-%m-%d")
-    # ISO?
     with suppress(Exception):
-        # Trim weird Z or fractional seconds safely
         s = str(created_at).strip().replace("Z", "+00:00")
         dt = datetime.fromisoformat(s)
         return dt.date().isoformat()
@@ -307,13 +417,16 @@ def scrape_ashby_jobs(company_name: str, org_slug: str, keyword_filters: list[st
     - Filters to US/CA by default (env configurable)
     - Filters to new-grad friendly roles by default (env configurable)
     - Adds a "Posted" date when available
+    Output rows match your main.py expectations.
     """
     print(f"Scraping {company_name} (Ashby)...")
 
-    jobs_raw = _fetch_jobs(org_slug)
+    jobs_raw, used_slug = _fetch_jobs(company_name, org_slug)
     if not jobs_raw:
         print(f"  > Could not fetch jobs for {company_name}.")
         return []
+    if ASHBY_DEBUG and used_slug:
+        print(f"    [Ashby] using slug: {used_slug}")
 
     kw = [k.lower() for k in (keyword_filters or [])]
     out: list[dict] = []
