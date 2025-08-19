@@ -1,6 +1,8 @@
+# src/scrapers/ashby.py
+
 import os
 import re
-import time
+import json
 import requests
 from contextlib import suppress
 from datetime import datetime, timezone
@@ -30,9 +32,28 @@ ASHBY_NEWGRAD_ONLY    = _flag("ASHBY_NEWGRAD_ONLY", "1")
 ASHBY_INCLUDE_INTERNS = _flag("ASHBY_INCLUDE_INTERNS", "0")
 
 # Preferred public endpoints (we try these in order).
-GET_TPL  = "https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
-POST_URL = "https://api.ashbyhq.com/posting-api/job-board"
-GQL_URL  = "https://jobs.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings"
+GET_TPL     = "https://api.ashbyhq.com/posting-api/job-board/{slug}?includeCompensation=true"
+POST_URL    = "https://api.ashbyhq.com/posting-api/job-board"
+GQL_GLOBAL  = "https://jobs.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings"
+# Per-org GQL (not all orgs have a subdomain): https://{slug}.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings
+
+UA_HEADERS_BASE = {
+    "User-Agent": "Mozilla/5.0 (compatible; job-automation-suite/1.0)",
+    "Accept": "application/json, text/plain, */*",
+}
+
+def _ashby_headers(slug: str, origin_host: str = "jobs.ashbyhq.com", extra: dict | None = None) -> dict:
+    """
+    Build headers that satisfy CORS/origin checks on many Ashby tenants.
+    """
+    h = dict(UA_HEADERS_BASE)
+    h.update({
+        "Origin": f"https://{origin_host}",
+        "Referer": f"https://{origin_host}/{slug}",
+    })
+    if extra:
+        h.update(extra)
+    return h
 
 
 # =======================
@@ -61,7 +82,6 @@ _CA_PROV_NAMES = {
 _REMOTE_RE      = re.compile(r"\b(remote|virtual|work\s*from\s*home|wfh)\b", re.I)
 _US_TOKEN_RE    = re.compile(r"\b(UNITED STATES|U\.?S\.?A?\.?|U\.?S\.?)\b", re.I)
 _CA_TOKEN_RE    = re.compile(r"\bCANADA\b", re.I)
-_NA_TOKEN_RE    = re.compile(r"\b(NORTH AMERICA|AMERICAS)\b", re.I)
 _CA_PROV_TOKEN  = re.compile(r"(?:^|,\s*)(AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT)(?:\s|,|$)", re.I)
 _US_STATE_TOKEN = re.compile(r"(?:^|,\s*)(AL|AK|AZ|AR|CA|CO|CT|DC|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY)(?:\s|,|$)", re.I)
 
@@ -77,13 +97,11 @@ def _infer_countries_from_location(text: str) -> set[str]:
         countries.add("US")
     if _CA_TOKEN_RE.search(up):
         countries.add("CA")
-    if _NA_TOKEN_RE.search(up):
-        countries.update({"US", "CA"})
 
     if _REMOTE_RE.search(up):
-        if _US_TOKEN_RE.search(up) or _NA_TOKEN_RE.search(up):
+        if _US_TOKEN_RE.search(up):
             countries.add("US")
-        if _CA_TOKEN_RE.search(up) or _NA_TOKEN_RE.search(up):
+        if _CA_TOKEN_RE.search(up):
             countries.add("CA")
 
     m_us = _US_STATE_TOKEN.search(up)
@@ -153,214 +171,307 @@ def _is_new_grad_friendly(title: str) -> bool:
 
 
 # =======================
-# Slug utilities + retries
+# Fetchers / Normalizers
 # =======================
 
-_slug_clean_re = re.compile(r"[^a-z0-9]+")
-def _slugify(s: str) -> str:
-    s = (s or "").lower().strip()
-    s = s.replace("&", "and")
-    s = _slug_clean_re.sub("-", s)
-    return s.strip("-")
+def _get_json(url: str, method: str = "GET", payload: dict | None = None, headers: dict | None = None) -> dict | None:
+    try:
+        if method == "GET":
+            if ASHBY_DEBUG:
+                print(f"    [Ashby fetch] GET {url}")
+            r = requests.get(url, timeout=30, headers=headers)
+        elif method == "POST":
+            if ASHBY_DEBUG:
+                print(f"    [Ashby fetch] POST {url}")
+            h = dict(headers or {})
+            h.setdefault("Content-Type", "application/json")
+            r = requests.post(url, timeout=30, json=payload or {}, headers=h)
+        else:
+            return None
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        if ASHBY_DEBUG:
+            print(f"    [Ashby fetch] {method} {url} -> {e}")
+        return None
 
-def _candidate_slugs(company_name: str, org_slug: str) -> list[str]:
-    # Generate a compact set of likely slugs to try
-    base = (org_slug or "").strip()
-    name = (company_name or "").strip()
-    cands = [
-        base,
-        base.lower(),
-        _slugify(base),
-        _slugify(name),
-        _slugify(name.replace("inc", "")),
-        _slugify(name.replace("labs", "")),
-        _slugify(name.replace(" ai", "")),
-        _slugify(name + " ai"),
+_NEXT_DATA_RE = re.compile(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(\{.*?\})</script>', re.S | re.I)
+
+def _fetch_from_html(html_url: str, slug: str) -> list[dict]:
+    """
+    Last-resort fallback: fetch public board HTML and extract jobs from
+    Next.js __NEXT_DATA__ JSON.
+    """
+    if ASHBY_DEBUG:
+        print(f"    [Ashby HTML] GET {html_url}")
+    try:
+        r = requests.get(html_url, timeout=30, headers=_ashby_headers(slug))
+        r.raise_for_status()
+        m = _NEXT_DATA_RE.search(r.text or "")
+        if not m:
+            if ASHBY_DEBUG:
+                print("    [Ashby HTML] __NEXT_DATA__ not found")
+            return []
+        with suppress(Exception):
+            data = json.loads(m.group(1))
+            # Try common paths
+            props = (data or {}).get("props") or {}
+            page = props.get("pageProps") or {}
+            jb = page.get("jobBoard") or page.get("board") or {}
+            jobs = jb.get("jobs") or jb.get("jobPostings") or []
+
+            out: list[dict] = []
+
+            def push(item: dict):
+                if not isinstance(item, dict):
+                    return
+                title = item.get("title") or item.get("jobTitle") or ""
+                url   = item.get("jobPostUrl") or item.get("jobUrl") or item.get("url") or item.get("applyUrl")
+                loc   = item.get("location") or {}
+                if isinstance(loc, dict):
+                    loc = loc.get("name") or loc.get("displayName") or ""
+                created = item.get("createdAt") or item.get("publishedAt") or item.get("postDate") or item.get("openedAt")
+                if title and url:
+                    out.append({
+                        "title": title,
+                        "url": url,
+                        "location": (loc or "").strip(),
+                        "createdAt": created,
+                    })
+
+            for j in jobs:
+                push(j)
+
+            # Nested groups/sections with openings
+            for key in ("groups", "sections", "departments", "teams", "categories"):
+                arr = jb.get(key)
+                if isinstance(arr, list):
+                    for g in arr:
+                        openings = (g or {}).get("openings") or []
+                        for op in openings:
+                            push(op)
+
+            if ASHBY_DEBUG:
+                print(f"    [Ashby HTML] extracted {len(out)} posting(s)")
+            return out
+    except Exception as e:
+        if ASHBY_DEBUG:
+            print(f"    [Ashby HTML] {html_url} -> {e}")
+    return []
+
+def _gql_payload(slug: str) -> dict:
+    return {
+        "operationName": "JobBoardWithOpenings",
+        "variables": {"organizationSlug": slug},
+        "query": (
+            "query JobBoardWithOpenings($organizationSlug: String!) {"
+            "  jobBoard(organizationSlug: $organizationSlug) {"
+            "    jobs { id title createdAt jobPostUrl location { name } }"
+            "    jobPostings { id title createdAt jobPostUrl location { name } }"
+            "    groups {"
+            "      name"
+            "      openings { id title createdAt jobPostUrl location { name } }"
+            "    }"
+            "  }"
+            "}"
+        ),
+    }
+
+def _normalize_jobs(data: dict | None) -> list[dict]:
+    """
+    Convert a known Ashby response shape into a list of job dicts.
+    NON-RECURSIVE: handle the public shapes we’ve seen.
+    """
+    jobs: list[dict] = []
+    if not isinstance(data, dict):
+        return jobs
+
+    def push(item: dict):
+        if not isinstance(item, dict):
+            return
+        title = (
+            item.get("title")
+            or item.get("jobTitle")
+            or item.get("postingTitle")
+            or ""
+        )
+        url = (
+            item.get("jobPostUrl")
+            or item.get("jobPostingUrl")
+            or item.get("jobUrl")
+            or item.get("applyUrl")
+            or item.get("url")
+            or ""
+        )
+        raw_loc = item.get("location") or item.get("primaryLocation") or item.get("office")
+        loc = ""
+        if isinstance(raw_loc, str):
+            loc = raw_loc.strip()
+        elif isinstance(raw_loc, dict):
+            loc = (raw_loc.get("name") or raw_loc.get("location") or raw_loc.get("displayName") or "").strip()
+        elif isinstance(raw_loc, list):
+            locs = []
+            for x in raw_loc:
+                if isinstance(x, str) and x.strip():
+                    locs.append(x.strip())
+                elif isinstance(x, dict):
+                    nm = (x.get("name") or x.get("location") or x.get("displayName") or "").strip()
+                    if nm:
+                        locs.append(nm)
+            loc = ", ".join(locs)
+        created = (
+            item.get("createdAt")
+            or item.get("publishedAt")
+            or item.get("postedAt")
+            or item.get("openDate")
+            or item.get("openedAt")
+            or item.get("updatedAt")
+        )
+        if title and url:
+            jobs.append({
+                "title": title,
+                "url": url,
+                "location": loc,
+                "createdAt": created,
+            })
+
+    # 1) direct jobs list
+    if isinstance(data.get("jobs"), list):
+        for j in data["jobs"]:
+            push(j)
+
+    # 2) jobPostings list
+    if isinstance(data.get("jobPostings"), list):
+        for j in data["jobPostings"]:
+            push(j)
+
+    # 3) jobBoard -> jobs / jobPostings / groups[*].openings
+    jb = data.get("jobBoard")
+    if isinstance(jb, dict):
+        if isinstance(jb.get("jobs"), list):
+            for j in jb["jobs"]:
+                push(j)
+        if isinstance(jb.get("jobPostings"), list):
+            for j in jb["jobPostings"]:
+                push(j)
+        for key in ("groups", "sections", "departments", "teams", "categories"):
+            arr = jb.get(key)
+            if isinstance(arr, list):
+                for g in arr:
+                    openings = (g or {}).get("openings") or []
+                    for op in openings:
+                        push(op)
+
+    # 4) GraphQL: data -> jobBoard -> same shapes
+    d2 = data.get("data")
+    if isinstance(d2, dict):
+        jb2 = d2.get("jobBoard")
+        if isinstance(jb2, dict):
+            if isinstance(jb2.get("jobs"), list):
+                for j in jb2["jobs"]:
+                    push(j)
+            if isinstance(jb2.get("jobPostings"), list):
+                for j in jb2["jobPostings"]:
+                    push(j)
+            for key in ("groups", "sections", "departments", "teams", "categories"):
+                arr = jb2.get(key)
+                if isinstance(arr, list):
+                    for g in arr:
+                        openings = (g or {}).get("openings") or []
+                        for op in openings:
+                            push(op)
+
+    return jobs
+
+def _fetch_for_slug(slug: str) -> list[dict]:
+    """
+    Try GET, POST, global GraphQL, per-org GraphQL, then HTML fallbacks.
+    Returns a list of normalized jobs.
+    """
+    if ASHBY_DEBUG:
+        print(f"    [Ashby] trying slug '{slug}'")
+
+    # A) GET endpoint
+    data = _get_json(GET_TPL.format(slug=slug), "GET", headers=_ashby_headers(slug))
+    jobs = _normalize_jobs(data)
+    if ASHBY_DEBUG:
+        print(f"    [Ashby] GET normalized {len(jobs)} job(s)")
+    if jobs:
+        return jobs
+
+    # B) POST endpoint (often 401 without origin/referrer)
+    data = _get_json(POST_URL, "POST", payload={"organizationSlug": slug}, headers=_ashby_headers(slug))
+    jobs = _normalize_jobs(data)
+    if ASHBY_DEBUG:
+        print(f"    [Ashby] POST normalized {len(jobs)} job(s)")
+    if jobs:
+        return jobs
+
+    # C1) Global GraphQL (jobs.ashbyhq.com)
+    data = _get_json(GQL_GLOBAL, "POST", payload=_gql_payload(slug), headers=_ashby_headers(slug))
+    jobs = _normalize_jobs(data)
+    if ASHBY_DEBUG:
+        print(f"    [Ashby] GQL global normalized {len(jobs)} job(s)")
+    if jobs:
+        return jobs
+
+    # C2) Per-org GraphQL endpoint: https://{slug}.ashbyhq.com/api/non-user-graphql
+    gql_org = f"https://{slug}.ashbyhq.com/api/non-user-graphql?op=JobBoardWithOpenings"
+    data = _get_json(gql_org, "POST", payload=_gql_payload(slug), headers=_ashby_headers(slug, origin_host=f"{slug}.ashbyhq.com"))
+    jobs = _normalize_jobs(data)
+    if ASHBY_DEBUG:
+        print(f"    [Ashby] GQL org normalized {len(jobs)} job(s)")
+    if jobs:
+        return jobs
+
+    # D) HTML page parsing fallback (Next.js __NEXT_DATA__)
+    html_urls = [
+        f"https://jobs.ashbyhq.com/{slug}",
+        f"https://{slug}.ashbyhq.com",
+        f"https://jobs.ashbyhq.com/{slug}/jobs",
     ]
-    # Remove empties & dups, preserve order
+    for u in html_urls:
+        jobs = _fetch_from_html(u, slug)
+        if jobs:
+            return jobs
+
+    return []
+
+def _slugify_company_name(company: str) -> list[str]:
+    """
+    Build a few reasonable slug candidates from a company name.
+    """
+    if not company:
+        return []
+    base = company.lower()
+    base = re.sub(r"\(.*?\)", "", base).strip()              # drop parentheses content
+    base = re.sub(r"[^a-z0-9]+", "-", base).strip("-")       # normalize to hyphens
+    candidates = [base, base.replace("-", "")]
+    parts = [p for p in re.split(r"[^a-z0-9]+", base) if p]
+    if parts:
+        candidates.append(parts[0])
+    # de-dupe preserving order
     seen, out = set(), []
-    for c in cands:
+    for c in candidates:
         if c and c not in seen:
             seen.add(c)
             out.append(c)
     return out
 
-def _request(method: str, url: str, payload: dict | None = None, max_retries: int = 2) -> requests.Response | None:
-    # Lightweight retry/backoff for 429/5xx/timeouts
-    backoff = 0.7
-    for attempt in range(max_retries + 1):
-        try:
-            if method == "GET":
-                r = requests.get(url, timeout=30)
-            else:
-                r = requests.post(url, json=payload or {}, timeout=30)
-            if r.status_code in (429, 500, 502, 503, 504):
-                if attempt < max_retries:
-                    time.sleep(backoff)
-                    backoff *= 2
-                    continue
-            r.raise_for_status()
-            return r
-        except requests.exceptions.RequestException as e:
-            if attempt < max_retries:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            if ASHBY_DEBUG:
-                print(f"    [Ashby fetch] {method} {url} -> {e}")
-            return None
-    return None
-
-def _get_json(method: str, url: str, payload: dict | None = None) -> dict | None:
-    r = _request(method, url, payload)
-    if not r:
-        return None
-    with suppress(Exception):
-        return r.json()
-    return None
-
-
-# =======================
-# Normalization helpers
-# =======================
-
-def _push_job(item: dict, sink: list[dict]) -> None:
-    if not isinstance(item, dict):
-        return
-    title = item.get("title") or item.get("jobTitle") or ""
-    url   = (
-        item.get("jobPostUrl") or item.get("jobUrl") or item.get("url")
-        or item.get("applyUrl") or item.get("postingUrl")
-    )
-    # location fields can vary wildly
-    loc = item.get("location")
-    if not loc:
-        loc = item.get("locationText") or item.get("displayLocation") or item.get("officeLocation")
-    if not loc:
-        locs = item.get("locations") or item.get("offices")  # may be list[str|dict]
-        if isinstance(locs, list) and locs:
-            parts = []
-            for x in locs:
-                if isinstance(x, str):
-                    parts.append(x.strip())
-                elif isinstance(x, dict):
-                    parts.append((x.get("name") or x.get("location") or x.get("displayName") or "").strip())
-            loc = ", ".join([p for p in parts if p])
-
-    created = (
-        item.get("createdAt") or item.get("publishedAt") or item.get("postDate")
-        or item.get("openedAt") or item.get("updatedAt") or item.get("updated_at")
-    )
-
-    if not (title and url):
-        return
-
-    sink.append({
-        "title": title,
-        "url": url,
-        "location": loc or "",
-        "createdAt": created,
-    })
-
-def _normalize_jobs(raw: dict) -> list[dict]:
-    if not isinstance(raw, dict):
-        return []
-
-    jobs: list[dict] = []
-
-    # Common shapes:
-
-    # A) Direct lists
-    for key in ("jobs", "jobPostings", "openJobs", "openings"):
-        lst = raw.get(key)
-        if isinstance(lst, list):
-            for j in lst:
-                _push_job(j, jobs)
-
-    # B) jobBoard wrapper (REST & GraphQL)
-    jb = raw.get("jobBoard") or {}
-    if isinstance(jb, dict):
-        for key in ("jobs", "openings", "openJobs"):
-            lst = jb.get(key)
-            if isinstance(lst, list):
-                for j in lst:
-                    _push_job(j, jobs)
-
-        # Nested departments/teams with jobs
-        for k in ("departments", "groups", "teams", "categories"):
-            depts = jb.get(k)
-            if isinstance(depts, list):
-                for d in depts:
-                    for key in ("jobs", "openings", "openJobs"):
-                        lst = (d or {}).get(key)
-                        if isinstance(lst, list):
-                            for j in lst:
-                                _push_job(j, jobs)
-
-    # C) GraphQL data wrapper
-    data = raw.get("data") or {}
-    if isinstance(data, dict):
-        jobs += _normalize_jobs(data)  # recurse into same patterns
-
-    # D) Sometimes everything is under 'result' or 'payload'
-    result = raw.get("result") or raw.get("payload") or {}
-    if isinstance(result, dict):
-        jobs += _normalize_jobs(result)
-
-    # Deduplicate by (title,url)
-    seen, deduped = set(), []
-    for j in jobs:
-        key = (j.get("title"), j.get("url"))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(j)
-    return deduped
-
-
-# =======================
-# Fetchers
-# =======================
-
-def _fetch_for_slug(slug: str) -> tuple[list[dict], str | None]:
-    # 1) GET
-    data = _get_json("GET", GET_TPL.format(slug=slug))
-    if not data:
-        # 2) POST
-        data = _get_json("POST", POST_URL, payload={"organizationSlug": slug})
-    if not data:
-        # 3) GraphQL
-        gql_body = {
-            "operationName": "JobBoardWithOpenings",
-            "variables": {"organizationSlug": slug},
-            "query": (
-                "query JobBoardWithOpenings($organizationSlug: String!) {"
-                "  jobBoard(organizationSlug: $organizationSlug) {"
-                "    jobs { id title createdAt jobPostUrl location { name } }"
-                "    departments { name jobs { id title createdAt jobPostUrl location { name } } }"
-                "  }"
-                "}"
-            ),
-        }
-        data = _get_json("POST", GQL_URL, payload=gql_body)
-
-    if not data:
-        return [], None
-
-    jobs = _normalize_jobs(data)
-    return jobs, slug
-
-def _fetch_jobs(company_name: str, org_slug: str) -> tuple[list[dict], str | None]:
-    last_err_slug = None
-    for slug in _candidate_slugs(company_name, org_slug):
-        jobs, used = _fetch_for_slug(slug)
+def _fetch_jobs(company_name: str, org_slug: str) -> tuple[list[dict], str]:
+    """
+    Try the provided slug first, then sanitized candidates from the company name.
+    Returns (jobs, used_slug).
+    """
+    tried = []
+    for slug in [org_slug] + _slugify_company_name(company_name):
+        if not slug or slug in tried:
+            continue
+        tried.append(slug)
+        jobs = _fetch_for_slug(slug)
         if jobs:
-            if ASHBY_DEBUG:
-                print(f"    [Ashby] slug '{used}' yielded {len(jobs)} jobs (pre-filter)")
-            return jobs, used
-        last_err_slug = slug
-    if ASHBY_DEBUG and last_err_slug:
-        print(f"    [Ashby] no data for tried slugs; last tried '{last_err_slug}'")
-    return [], None
+            return jobs, slug
+    return [], org_slug
 
 
 # =======================
@@ -387,7 +498,7 @@ def _collect_location_strings(raw_location) -> list[str]:
     # de-dupe
     seen, uniq = set(), []
     for s in out:
-        if s and s not in seen:
+        if s not in seen:
             seen.add(s)
             uniq.append(s)
     return uniq or ["N/A"]
@@ -417,7 +528,6 @@ def scrape_ashby_jobs(company_name: str, org_slug: str, keyword_filters: list[st
     - Filters to US/CA by default (env configurable)
     - Filters to new-grad friendly roles by default (env configurable)
     - Adds a "Posted" date when available
-    Output rows match your main.py expectations.
     """
     print(f"Scraping {company_name} (Ashby)...")
 
@@ -425,8 +535,8 @@ def scrape_ashby_jobs(company_name: str, org_slug: str, keyword_filters: list[st
     if not jobs_raw:
         print(f"  > Could not fetch jobs for {company_name}.")
         return []
-    if ASHBY_DEBUG and used_slug:
-        print(f"    [Ashby] using slug: {used_slug}")
+    if ASHBY_DEBUG and used_slug != org_slug:
+        print(f"    [Ashby] fetched using candidate slug '{used_slug}'")
 
     kw = [k.lower() for k in (keyword_filters or [])]
     out: list[dict] = []

@@ -66,21 +66,22 @@
 
     "Hudson River Trading": "wehrtyou",
     "Akuna Capital": "akunacapital",
-    "Flow Traders": "flowtraders"
+    "Flow Traders": "flowtraders",
+
+    "Vercel": "vercel",
+    "Retool": "retool",
+    "Perplexity AI": "perplexityai",
+    "Mercury": "mercury"
+
+
   },
     "ashby": {
-    "Vercel": "vercel",
     "Ramp": "ramp",
     "Replit": "replit",
     "Linear": "linear",
-    "Retool": "retool",
-    "Perplexity": "perplexity-ai",
-    "Mercury": "mercury",
-    "Loom": "loom",
     "Vanta": "vanta",
-    "Notion (Ashby board)": "notion", 
-    "Substack": "substack",
-    "Vercel Agency (example)": "vercel-agency"
+    "Notion (Ashby board)": "notion",
+    "Substack": "substack"
   },
   "lever": {
 
