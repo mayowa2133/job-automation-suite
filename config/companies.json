@@ -74,7 +74,7 @@
     "Mercury": "mercury",
 
     "DoorDash": "doordashusa",
-    "Snowflake": "snowflakecomputing",
+    "Snowflake": "snowflake",
     "Confluent": "confluent",
     "Palantir": "palantir",
     "Webflow": "webflow",
@@ -84,9 +84,12 @@
     "Anduril Industries": "andurilindustries",
     "Relativity Space": "relativity",
     "Nuro": "nuro",
-    "Roblox": "roblox"
+    "Roblox": "roblox",
 
-
+    "Tailscale": "tailscale",
+    "OpenPhone": "openphone",
+    "OpenZeppelin": "openzeppelin",
+    "Sourcegraph": "sourcegraph91"
   },
     "ashby": {
     "Ramp": "ramp",
@@ -127,8 +130,6 @@
     "Chainlink Labs": "chainlink-labs",
     "Writer": "writer",
     "Perplexity": "perplexity",
-    "Sourcegraph": "sourcegraph",
-    "Tailscale": "tailscale",
     "Mux": "mux"
   },
   "lever": {
