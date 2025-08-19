@@ -71,7 +71,20 @@
     "Vercel": "vercel",
     "Retool": "retool",
     "Perplexity AI": "perplexityai",
-    "Mercury": "mercury"
+    "Mercury": "mercury",
+
+    "DoorDash": "doordashusa",
+    "Snowflake": "snowflakecomputing",
+    "Confluent": "confluent",
+    "Palantir": "palantir",
+    "Webflow": "webflow",
+    "Quora": "quora",
+    "Cruise": "cruise",
+    "Zoox": "zoox",
+    "Anduril Industries": "andurilindustries",
+    "Relativity Space": "relativity",
+    "Nuro": "nuro",
+    "Roblox": "roblox"
 
 
   },
@@ -82,7 +95,6 @@
     "Vanta": "vanta",
     "Notion (Ashby board)": "notion",
     "Substack": "substack",
-
     "OpenSea": "OpenSea",
     "Character AI": "character",
     "Runway": "runway",
@@ -94,7 +106,6 @@
     "Bounce AI": "bounce",
     "Firecrawl": "firecrawl",
     "Sentry": "sentry",
-    "OpenPhone": "openphone",
     "Arc (JoinArc)": "joinarc",
     "Modal": "modal",
     "Kustomer": "Kustomer",
@@ -108,11 +119,17 @@
     "Boostly": "boostly",
     "MotherDuck": "MotherDuck",
     "Prime Intellect": "primeintellect",
-    "Gem": "gem",
-    "Convex": "convex",
-    "Raycast": "raycast",
-    "OpenZeppelin": "openzeppelin",
-    "Prefect": "prefect"
+    "Prefect": "prefect",
+
+
+    "PostHog": "posthog",
+    "ElevenLabs": "elevenlabs",
+    "Chainlink Labs": "chainlink-labs",
+    "Writer": "writer",
+    "Perplexity": "perplexity",
+    "Sourcegraph": "sourcegraph",
+    "Tailscale": "tailscale",
+    "Mux": "mux"
   },
   "lever": {
 
