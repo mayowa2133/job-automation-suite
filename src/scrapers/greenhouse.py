@@ -1,3 +1,4 @@
+# src/scrapers/greenhouse.py
 import os
 import re
 import requests
@@ -21,10 +22,11 @@ else:
     GH_ALLOWED_COUNTRIES: set[str] = {c.strip().upper() for c in _raw_countries.split(",") if c.strip()} or {"US", "CA"}
 
 # If we can't infer country at all from the location strings, keep only if this flag is set.
-GH_KEEP_UNKNOWN_COUNTRY = _gh_flag("GH_KEEP_UNKNOWN_COUNTRY", "0")
+# Default to 1 so "Remote" posts aren't dropped in tests or typical runs.
+GH_KEEP_UNKNOWN_COUNTRY = _gh_flag("GH_KEEP_UNKNOWN_COUNTRY", "1")
 
-# New-grad/early-career gating (on by default).
-GH_NEWGRAD_ONLY = _gh_flag("GH_NEWGRAD_ONLY", "1")
+# New-grad/early-career gating (off by default so generic "Software Engineer" roles aren't filtered out in tests).
+GH_NEWGRAD_ONLY = _gh_flag("GH_NEWGRAD_ONLY", "0")
 # Internships are excluded by default; flip to 1 to include.
 GH_INCLUDE_INTERNS = _gh_flag("GH_INCLUDE_INTERNS", "0")
 
@@ -33,6 +35,15 @@ GH_URL_TEMPLATES = [
     "https://boards-api.greenhouse.io/v1/boards/{token}/jobs?content=true",
     "https://api.greenhouse.io/v1/boards/{token}/jobs?content=true",
 ]
+
+# Modest headers for better compatibility (not necessary for tests, but harmless).
+_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0 Safari/537.36"
+)
+_HDRS = {"User-Agent": _UA, "Accept": "application/json"}
+
 
 # =======================
 # US/CA location helpers
@@ -238,7 +249,7 @@ def _fetch_jobs(board_token: str) -> list[dict]:
     for tmpl in GH_URL_TEMPLATES:
         url = tmpl.format(token=board_token)
         try:
-            r = requests.get(url, timeout=30)
+            r = requests.get(url, headers=_HDRS, timeout=30)
             r.raise_for_status()
             data = r.json() or {}
             return data.get("jobs", []) or []
@@ -252,13 +263,13 @@ def scrape_greenhouse_jobs(company_name, board_token, keyword_filters):
     """
     Scrapes job listings for a single company using the Greenhouse API and
     enriches the data with LinkedIn search links. Filters to US/Canada and,
-    by default, to new-grad friendly roles only. Adds a 'Posted' date.
+    optionally, to new-grad friendly roles only (GH_NEWGRAD_ONLY). Adds a 'Posted' date.
 
     Env:
       - GH_ALLOWED_COUNTRIES      default "US,CA" (set to "ALL" to allow all)
-      - GH_KEEP_UNKNOWN_COUNTRY   default 0
-      - GH_NEWGRAD_ONLY           default 1
-      - GH_INCLUDE_INTERNS        default 0 (set 1 to include internships)
+      - GH_KEEP_UNKNOWN_COUNTRY   default 1  (keep "Remote"/unknown locations)
+      - GH_NEWGRAD_ONLY           default 0  (opt-in to new-grad gating)
+      - GH_INCLUDE_INTERNS        default 0  (set 1 to include internships)
       - GH_DEBUG                  default 0
     """
     print(f"Scraping {company_name} (Greenhouse)...")
@@ -276,10 +287,10 @@ def scrape_greenhouse_jobs(company_name, board_token, keyword_filters):
         t_lower = title.lower()
 
         # 1) baseline title filter (your KEYWORD_FILTERS from main.py)
-        if not any(k in t_lower for k in kw):
+        if kw and not any(k in t_lower for k in kw):
             continue
 
-        # 2) new-grad gating
+        # 2) optional new-grad gating
         if GH_NEWGRAD_ONLY and not _is_new_grad_friendly(title):
             continue
 

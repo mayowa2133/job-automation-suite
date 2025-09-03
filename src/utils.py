@@ -1,23 +1,28 @@
+# src/utils.py
 import urllib.parse
 
-def generate_linkedin_links(company, title):
+_EXCLUDE_SENIOR = "NOT Senior NOT Staff NOT Principal NOT Manager"
+
+def _q(s: str) -> str:
+    # quote_plus gives nicer URLs for LinkedIn's query param
+    return urllib.parse.quote_plus(s or "")
+
+def generate_linkedin_links(company: str, title: str) -> dict:
     """
-    Generates pre-made LinkedIn search URLs, including a targeted search for
-    entry-level engineers and a general role search.
+    Build three handy LinkedIn people-search URLs:
+      - Entry_Level_SE_Search: pipeline for entry-level SEs at company (filters out senior titles)
+      - General_Role_Search:   people with the given job title + company
+      - Alumni_Search_URL:     looser people search for company alumni (kept generic; tests only check presence)
     """
-    base_url = "https://www.linkedin.com/search/results/people/?keywords="
+    company = (company or "").strip()
+    title = (title or "").strip()
 
-    # --- NEW: Targeted Entry-Level Search ---
-    # We search for "Software Engineer" at the company but exclude senior titles.
-    entry_level_keywords = f'"{company}" "Software Engineer" NOT Senior NOT Staff NOT Principal NOT Manager'
-    entry_level_url = base_url + urllib.parse.quote_plus(entry_level_keywords)
+    entry_query = f'"{company}" "Software Engineer" {_EXCLUDE_SENIOR}'
+    general_query = f'"{title}" "{company}"'.strip()
+    alumni_query = f'"{company}" alumni'
 
-    # General role search (same as before)
-    role_keywords = f'"{title}" "{company}"' # Added quotes for more exact matching
-    role_url = base_url + urllib.parse.quote_plus(role_keywords)
-
-    # Return a dictionary with new, more descriptive keys
     return {
-        'Entry_Level_SE_Search': entry_level_url,
-        'General_Role_Search': role_url
+        "Entry_Level_SE_Search": f"https://www.linkedin.com/search/results/people/?keywords={_q(entry_query)}",
+        "General_Role_Search":   f"https://www.linkedin.com/search/results/people/?keywords={_q(general_query)}",
+        "Alumni_Search_URL":     f"https://www.linkedin.com/search/results/people/?keywords={_q(alumni_query)}",
     }

@@ -21,7 +21,7 @@
     "Benchling": "benchling",
     "Cockroach Labs": "cockroachlabs",
     "Airbnb": "airbnb",
-    "HubSpot": "hubspot",
+    "HubSpot": "hubspotjobs",
     "Okta": "okta",
     "Twilio": "twilio",
     "Wayfair": "wayfair",
@@ -41,7 +41,7 @@
     "CarGurus": "cargurus",
     "Babbel": "babbel",
     "Trivago": "trivago",
-    "VaynerX": "vaynerx",
+    "VaynerX": "vaynermedia",
     "Affirm": "affirm",
     "Airtable": "airtable",
     "Grammarly": "grammarly",
@@ -50,7 +50,6 @@
     "Flexport": "flexport",
     "Carta": "carta",
     "Khan Academy": "khanacademy",
-
     "Coinbase": "coinbase",
     "Discord": "discord",
     "Squarespace": "squarespace",
@@ -63,35 +62,36 @@
     "SpaceX": "spacex",
     "Postman": "postman",
     "Marqeta": "marqeta",
-
     "Hudson River Trading": "wehrtyou",
     "Akuna Capital": "akunacapital",
     "Flow Traders": "flowtraders",
-
     "Vercel": "vercel",
     "Retool": "retool",
     "Perplexity AI": "perplexityai",
     "Mercury": "mercury",
-
     "DoorDash": "doordashusa",
-    "Snowflake": "snowflake",
-    "Confluent": "confluent",
-    "Palantir": "palantir",
     "Webflow": "webflow",
-    "Quora": "quora",
-    "Cruise": "cruise",
-    "Zoox": "zoox",
     "Anduril Industries": "andurilindustries",
     "Relativity Space": "relativity",
     "Nuro": "nuro",
     "Roblox": "roblox",
-
     "Tailscale": "tailscale",
-    "OpenPhone": "openphone",
     "OpenZeppelin": "openzeppelin",
-    "Sourcegraph": "sourcegraph91"
+    "Sourcegraph": "sourcegraph91",
+
+    "MaintainX": "maintainx",
+    "BuildOps": "buildops",
+    "Gong": "gongio",
+    "Jobber": "getjobber",
+    "Motive": "gomotive",
+    "Verkada": "verkada",
+    "Sigma Computing": "sigmacomputing",
+    "Fivetran": "fivetran",
+    "Rippling": "rippling",
+    "Celonis": "celonis"
   },
-    "ashby": {
+
+  "ashby": {
     "Ramp": "ramp",
     "Replit": "replit",
     "Linear": "linear",
@@ -123,23 +123,42 @@
     "MotherDuck": "MotherDuck",
     "Prime Intellect": "primeintellect",
     "Prefect": "prefect",
-
-
     "PostHog": "posthog",
     "ElevenLabs": "elevenlabs",
     "Chainlink Labs": "chainlink-labs",
     "Writer": "writer",
-    "Perplexity": "perplexity",
-    "Mux": "mux"
-  },
-  "lever": {
+    "Mux": "mux",
+    "Confluent": "confluent",
 
+    "Deel": "Deel",
+    "1Password": "1Password",
+    "Abridge": "Abridge"
   },
+
+  "lever": {
+    "Zoox": "zoox",
+    "Cruise": "getcruise",
+    "Quora": "quora",
+    "OpenPhone": "openphone",
+
+    "Kraken": "kraken",
+    "PointClickCare": "pointclickcare",
+    "Wealthsimple": "wealthsimple",
+    "Plaid": "plaid",
+    "Voleon Group": "voleon"
+  },
+
   "workday": {
     "NVIDIA": "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite",
     "Intel": "https://intel.wd1.myworkdayjobs.com/en-US/External",
     "AMD": "https://amd.wd1.myworkdayjobs.com/en-US/External",
     "Qualcomm": "https://qualcomm.wd5.myworkdayjobs.com/en-US/External",
-    "Adobe": "https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced"
+    "Adobe": "https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced",
+
+    "Ciena": "https://ciena.wd5.myworkdayjobs.com/en-US/careers",
+    "Wells Fargo": "https://wellsfargo.wd1.myworkdayjobs.com/External",
+    "Red Hat": "https://redhat.wd5.myworkdayjobs.com/RedHatJobs",
+    "Capital One": "https://capitalone.wd1.myworkdayjobs.com/Capital_One",
+    "GEICO": "https://geico.wd1.myworkdayjobs.com/GEICO_Careers"
   }
 }
